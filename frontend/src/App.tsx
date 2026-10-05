@@ -13,6 +13,11 @@ import { ProfilePanel, RunPanel } from "./Panels";
 import { RecommendationCard } from "./RecommendationCard";
 
 const USER_KEY = "detour.userId";
+// Blind study mode (?study): both rankings of the same pool are shown as "List A/B" in a
+// random order, without explanations or scores, and both collect feedback. Feedback is
+// logged against the run that produced each list, so it can be attributed afterwards
+// (python -m detour.eval.study).
+const STUDY = new URLSearchParams(window.location.search).has("study");
 const K = 8;
 
 function readUserId(): string | null {
@@ -51,7 +56,8 @@ export default function App() {
   const [profile, setProfile] = useState<ProfileSnapshot | null>(null);
   const [feedback, setFeedback] = useState<Record<number, FeedbackType>>({});
   const [pendingRepo, setPendingRepo] = useState<number | null>(null);
-  const [compare, setCompare] = useState(false);
+  const [compare, setCompare] = useState(STUDY);
+  const [swap, setSwap] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -91,8 +97,9 @@ export default function App() {
           await api.putInterests(id, labels);
           setSavedInterests(labels);
         }
-        const res = await api.recommend(id, K, withCompare);
+        const res = await api.recommend(id, K, STUDY || withCompare);
         setResult(res);
+        setSwap(Math.random() < 0.5);
         setProfile(res.run.profile);
         setFeedback({});
         setEditing(false);
@@ -106,11 +113,11 @@ export default function App() {
     [userId, savedInterests],
   );
 
-  async function sendFeedback(repoId: number, type: FeedbackType) {
+  async function sendFeedback(repoId: number, type: FeedbackType, runId?: string) {
     if (!userId || !result) return;
     setPendingRepo(repoId);
     try {
-      const res = await api.feedback(userId, repoId, type, result.run.run_id);
+      const res = await api.feedback(userId, repoId, type, runId ?? result.run.run_id);
       setFeedback((f) => ({ ...f, [repoId]: type }));
       setProfile(res.profile);
     } catch (e) {
@@ -169,10 +176,12 @@ export default function App() {
           </p>
           <InterestPicker catalog={catalog} selected={selected} onChange={setSelected} disabled={busy} />
           <div className="setup-actions">
-            <label className="toggle">
-              <input type="checkbox" checked={compare} onChange={(e) => setCompare(e.target.checked)} />
-              Also show a relevance-only list for comparison
-            </label>
+            {!STUDY && (
+              <label className="toggle">
+                <input type="checkbox" checked={compare} onChange={(e) => setCompare(e.target.checked)} />
+                Also show a relevance-only list for comparison
+              </label>
+            )}
             <button
               type="button"
               className="btn-primary"
@@ -188,17 +197,19 @@ export default function App() {
         <main className="results">
           <div className="results-bar">
             <div>
-              <h1 className="results-title">Your detours</h1>
+              <h1 className="results-title">{STUDY ? "Compare two lists" : "Your detours"}</h1>
               <p className="results-sub">For {savedInterests.join(", ")}</p>
             </div>
             <div className="results-actions">
               <button type="button" className="btn-quiet" onClick={() => setEditing(true)} disabled={busy}>
                 Edit interests
               </button>
-              <label className="toggle">
-                <input type="checkbox" checked={compare} onChange={(e) => setCompare(e.target.checked)} />
-                Compare with relevance-only
-              </label>
+              {!STUDY && (
+                <label className="toggle">
+                  <input type="checkbox" checked={compare} onChange={(e) => setCompare(e.target.checked)} />
+                  Compare with relevance-only
+                </label>
+              )}
               <button
                 type="button"
                 className="btn-primary"
@@ -225,6 +236,29 @@ export default function App() {
             </p>
           )}
 
+          {STUDY && r && cmp ? (
+            <div className="columns study">
+              <p className="study-note">
+                Two lists built from the same candidates. Rate every repository in both: “Interested” if
+                you would explore it, “Already know it” if you knew it, “Not for me” if it isn't relevant.
+              </p>
+              {(swap ? [cmp, r] : [r, cmp]).map((list, i) => (
+                <div className="feed" key={list.run_id}>
+                  <h2 className="col-head">List {i === 0 ? "A" : "B"}</h2>
+                  {list.items.map((rec) => (
+                    <RecommendationCard
+                      key={rec.repo.github_id}
+                      rec={rec}
+                      compact
+                      feedback={feedback[rec.repo.github_id]}
+                      pending={pendingRepo === rec.repo.github_id}
+                      onFeedback={(t) => sendFeedback(rec.repo.github_id, t, list.run_id)}
+                    />
+                  ))}
+                </div>
+              ))}
+            </div>
+          ) : (
           <div className={cmp ? "columns compare" : "columns"}>
             <div className="feed">
               {cmp && (
@@ -264,6 +298,7 @@ export default function App() {
               </button>
             </aside>
           </div>
+          )}
         </main>
       )}
       <footer className="foot">

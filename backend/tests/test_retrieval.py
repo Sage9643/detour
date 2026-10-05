@@ -289,3 +289,23 @@ def test_unexpected_error_in_one_query_degrades_instead_of_crashing() -> None:
     assert out.degraded
     assert any(q.source == "failed" for q in out.queries)
     assert out.candidates
+
+
+def test_starred_paging_stops_early_when_told() -> None:
+    pages: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pages.append(request.url.params["page"])
+        row = {
+            "starred_at": "2026-01-01T00:00:00Z",
+            "repo": FakeGitHub()
+            .handle(httpx.Request("GET", "https://x/search/repositories?q=raft"))
+            .json()["items"][0],
+        }
+        return httpx.Response(200, json=[row] * 100)
+
+    gh = client_for(handler)
+    assert len(gh.starred("someone", max_pages=3)) == 300
+    pages.clear()
+    out = gh.starred("someone", max_pages=3, stop=lambda stars: len(stars) >= 100)
+    assert len(out) == 100 and pages == ["1"]

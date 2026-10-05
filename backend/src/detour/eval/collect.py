@@ -29,6 +29,7 @@ import random
 import sys
 import time
 from collections import Counter
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -151,7 +152,7 @@ def collect_users(data: Path, max_users: int, budget_s: float) -> bool:
                 print("time budget reached; re-run to continue")
                 return False
             try:
-                starred = gh.starred(login, max_pages=3)
+                starred = gh.starred(login, max_pages=3, stop=enough_pages(cutoff))
             except GitHubBadRequest:
                 private["examined"].append(login)
                 continue
@@ -168,6 +169,22 @@ def collect_users(data: Path, max_users: int, budget_s: float) -> bool:
     _save(data / "state.json", state)
     print(f"examined={len(private['examined'])} eligible={len(_load(data / 'examples.json', []))}")
     return True
+
+
+KNOWN_TARGET = 50  # enough pre-cutoff stars to derive interests reliably
+
+
+def enough_pages(cutoff: datetime) -> Callable[[list[Any]], bool]:
+    """Stop paging once we have enough pre-cutoff stars, or once it is clear the user is a
+    bulk starrer (more post-cutoff stars than the held-out cap): either way, further pages
+    cannot change the outcome."""
+
+    def stop(stars: list[Any]) -> bool:
+        known = sum(1 for s in stars if s.starred_at <= cutoff)
+        after = len(stars) - known
+        return known >= KNOWN_TARGET or after > MAX_HELDOUT
+
+    return stop
 
 
 def build_example(login: str, starred: list[Any], cutoff: datetime) -> dict[str, Any] | None:

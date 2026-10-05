@@ -8,6 +8,7 @@ caching is the retrieval service's job (detour.retrieval.service).
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -109,8 +110,17 @@ class GitHubClient:
         """Generic GET on the core API (used by offline dataset collection)."""
         return self._get_json(path, params, self.core_rate, accept=accept)
 
-    def starred(self, username: str, max_pages: int = 3) -> list[StarredRepo]:
-        """A user's starred repositories with timestamps (newest first)."""
+    def starred(
+        self,
+        username: str,
+        max_pages: int = 3,
+        stop: Callable[[list[StarredRepo]], bool] | None = None,
+    ) -> list[StarredRepo]:
+        """A user's starred repositories with timestamps (newest first).
+
+        `stop` is checked after every page; returning True ends paging early, which saves
+        API budget (the unauthenticated core limit is 60 requests/hour).
+        """
         out: list[StarredRepo] = []
         for page in range(1, max_pages + 1):
             data = self._get_json(
@@ -128,7 +138,7 @@ class GitHubClient:
                         repo=RepoRecord.from_github(row["repo"]),
                     )
                 )
-            if len(data) < 100:
+            if len(data) < 100 or (stop is not None and stop(out)):
                 break
         return out
 

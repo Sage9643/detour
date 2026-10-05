@@ -324,3 +324,35 @@ def test_cors_allows_configured_frontend_origin(client: TestClient) -> None:
         headers={"Origin": "http://localhost:5173", "Access-Control-Request-Method": "POST"},
     )
     assert r.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+
+def test_blind_study_feedback_is_attributed_to_each_system(
+    client: TestClient, clean_db: Engine
+) -> None:
+    from detour.eval.study import analyse, wilson
+
+    uid = new_user(client)
+    body = recommend(client, uid, k=4, compare_variant="B1")
+    d3, b1 = body["run"], body["comparison"]
+    # rate the first item of each list from within that list (as the study UI does)
+    assert (
+        feedback(
+            client, uid, d3["items"][0]["repo"]["github_id"], "INTERESTED", d3["run_id"]
+        ).status_code
+        == 201
+    )
+    b1_only = [
+        i
+        for i in b1["items"]
+        if i["repo"]["github_id"] not in {x["repo"]["github_id"] for x in d3["items"]}
+    ]
+    target = (b1_only or b1["items"])[0]["repo"]["github_id"]
+    assert feedback(client, uid, target, "NOT_INTERESTED", b1["run_id"]).status_code == 201
+
+    out = analyse(clean_db)
+    assert out["pairs"] == 1
+    assert out["per_variant"]["D3"]["INTERESTED"] == 1
+    assert out["per_variant"]["B1"]["NOT_INTERESTED"] == 1
+    assert out["d3_wins"] == 1 and out["d3_losses"] == 0
+    lo, hi = wilson(8, 10)
+    assert 0.44 < lo < 0.5 and 0.94 < hi < 0.98
