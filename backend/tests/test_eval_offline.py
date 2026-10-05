@@ -99,3 +99,25 @@ def test_derive_interests_and_example_split() -> None:
     assert ex["user"] != "someone"  # anonymized
     assert len(ex["known"]) == 20
     assert {r["github_id"] for r in ex["heldout"]} == {900}
+
+
+def test_markdown_tables_render_from_report() -> None:
+    from detour.eval.offline import render_markdown
+
+    pool = _pool([(103, ["core"]), (104, ["core"]), (205, ["bridge"]), (207, ["adjacent"])])
+    res = evaluate_user(_example(), pool, default_embedder(), RankerConfig(k=3))
+    report = {
+        "engine_version": "x",
+        "embedding_model": "m",
+        "ranker_config": {"k": 3},
+        "dataset": {
+            "users": 1,
+            "examples_total": 1,
+            "cutoff": "2026-06-01T00:00:00",
+            "mean_heldout": 2.0,
+            "mean_pool": 4.0,
+        },
+        "aggregate": aggregate([res]),
+    }
+    md = render_markdown(report)
+    assert "| B1 |" in md and "| D3 |" in md and "pool recall" in md

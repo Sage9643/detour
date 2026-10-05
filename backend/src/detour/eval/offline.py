@@ -294,6 +294,7 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument("--sweep", action="store_true", help="also sweep D3's lambda and beta")
+    ap.add_argument("--markdown", help="also write result tables as Markdown to this path")
     args = ap.parse_args()
     data = Path(args.data)
     examples = json.loads((data / "examples.json").read_text(encoding="utf-8"))
@@ -329,6 +330,8 @@ def main() -> None:
     if args.sweep:
         report["sweep_D3"] = sweep(examples, pools, embedder, cfg)
     Path(args.out).write_text(json.dumps(report, indent=1), encoding="utf-8")
+    if args.markdown:
+        Path(args.markdown).write_text(render_markdown(report) + "\n", encoding="utf-8")
     print(render_summary(report))
     if args.sweep:
         print("\nD3 sweep: lambda beta | ILD coverage log10stars unfamiliarity | recall on-profile")
@@ -336,6 +339,76 @@ def main() -> None:
         for r in sweep_rows:
             vals = "  ".join(f"{v:.3f}" for k, v in r.items() if "." in k)
             print(f"  {r['mmr_lambda']:.2f} {r['beta_novelty']:.1f}  {vals}")
+
+
+def render_markdown(report: dict[str, Any]) -> str:
+    """Tables for docs/evaluation.md, generated from the report (never typed by hand)."""
+    agg, d = report["aggregate"], report["dataset"]
+    k = report["ranker_config"]["k"]
+
+    def fmt(s: dict[str, float]) -> str:
+        if math.isnan(s["mean"]):
+            return "n/a"
+        return f"{s['mean']:.3f} [{s['ci_low']:.3f}, {s['ci_high']:.3f}]"
+
+    out = [
+        f"Snapshot: {d['users']} users (of {d['examples_total']} eligible), "
+        f"cutoff {d['cutoff'][:10]}, "
+        f"mean |H| = {d['mean_heldout']:.1f}, mean pool = {d['mean_pool']:.0f} candidates, "
+        f"k = {k}, engine {report['engine_version']}, embeddings {report['embedding_model']}. "
+        "Cells: mean [95% bootstrap CI] over users.",
+        "",
+        "**Retrieval: share of held-out stars present in the candidate pool**",
+        "",
+        "| families | pool recall |",
+        "|---|---|",
+    ]
+    out += [f"| {n} | {fmt(s)} |" for n, s in agg["pool_recall"].items()]
+    cols = [
+        ("recall", "recall@k"),
+        ("recall_on_profile", "recall on-profile"),
+        ("recall_long_tail", "recall long-tail"),
+        ("serendipity", "serendipity@k"),
+        ("ild", "ILD"),
+        ("interest_coverage", "coverage"),
+        ("mean_log10_stars", "log10 stars"),
+        ("unfamiliarity", "unfamiliarity"),
+    ]
+    for protocol, title in (
+        ("end_to_end", "End-to-end (rank the retrieved pool as-is)"),
+        ("ranking_only", "Ranking-only (held-out stars injected into the pool)"),
+    ):
+        out += ["", f"**{title}**", "", "| variant | " + " | ".join(c[1] for c in cols) + " |"]
+        out.append("|---" * (len(cols) + 1) + "|")
+        for v, ms in agg[protocol].items():
+            if v == "paired_vs_B1":
+                continue
+            out.append(f"| {v} | " + " | ".join(f"{ms[c]['mean']:.3f}" for c, _ in cols) + " |")
+    out += [
+        "",
+        "**Paired difference D3 minus B1 (per user)**",
+        "",
+        "| metric | end-to-end | ranking-only |",
+        "|---|---|---|",
+    ]
+    for c, label in cols:
+        out.append(
+            f"| {label} | {fmt(agg['end_to_end']['paired_vs_B1']['D3'][c])} | "
+            f"{fmt(agg['ranking_only']['paired_vs_B1']['D3'][c])} |"
+        )
+    if "sweep_D3" in report:
+        out += [
+            "",
+            "**D3 sweep (means over users)**",
+            "",
+            "| lambda | beta | ILD | coverage | log10 stars | unfamiliarity "
+            "| recall (ranking-only) | recall on-profile |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for r in report["sweep_D3"]:
+            vals = " | ".join(f"{v:.3f}" for kk, v in r.items() if "." in kk)
+            out.append(f"| {r['mmr_lambda']:.2f} | {r['beta_novelty']:.1f} | {vals} |")
+    return "\n".join(out)
 
 
 def render_summary(report: dict[str, Any]) -> str:

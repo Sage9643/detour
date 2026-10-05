@@ -95,3 +95,22 @@ GitHub transport, failure-path tests, and explanation-claim tests. 7 frontend un
 tests. The UI was driven end-to-end with Playwright, with screenshots reviewed.
 
 **Evaluation:** see `evaluation.md` §7 for the measured numbers and their limitations.
+
+**GitHub budget handling (the session was briefly stalled waiting for a reset).**
+- The exhausted limit was the unauthenticated **core** REST budget (60/hour). Only the
+  offline collector uses it (`/users/{u}/starred`, `/repos/{r}/forks`); the app's search
+  budget was unaffected.
+- No token was configured on the linked machine. The cloud workspace's proxy blocks
+  these endpoints.
+- Changes made:
+  - the collector exits immediately on rate limit instead of blocking;
+  - it is replay-first, so re-runs cost nothing;
+  - it now stops paging a user's stars once the outcome is decided (usually 1 page
+    instead of up to 3);
+  - collection runs opportunistically between other work.
+- The app was never blocked: it has a Postgres search cache with a stale fallback, and
+  development and tests use (a) a real GitHub recording from 2026-10-05, replayed, and
+  (b) a synthetic fake GitHub that is used only by tests and labelled as such.
+
+**Blind A/B study tooling:** frontend `?study` mode plus `detour.eval.study`. Not run,
+since there were no participants.
