@@ -114,3 +114,12 @@ tests. The UI was driven end-to-end with Playwright, with screenshots reviewed.
 
 **Blind A/B study tooling:** frontend `?study` mode plus `detour.eval.study`. Not run,
 since there were no participants.
+
+**Offline evaluation run** (24 users, 2 collection passes within the unauthenticated
+budget). Full results and interpretation are in `evaluation.md` §7.3–7.4.
+- Retrieval is the bottleneck (1.9% pool recall).
+- No measurable accuracy difference between D3 and B1.
+- Large, consistent diversity and popularity effects.
+- The coverage floor matters (D1 loses coverage).
+- Popularity wins the stars benchmark, as anticipated.
+- The defaults were not tuned on these results.

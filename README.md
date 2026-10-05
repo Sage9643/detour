@@ -35,13 +35,20 @@ interests ─► GitHub search: core / bridge / adjacent-topic queries ─► ~1
   38% of off-topic candidates through the gate and ranked zero repos for one interest.
   The per-interest background-margin gate lets 6% through, keeps 94% of on-topic
   candidates, and balances the interests (8/8/8 in the top 24).
-- **Diversity and popularity:** on the offline benchmark, D3 raises intra-list diversity
-  over B1 (paired bootstrap CI above zero) and recommends far less popular repositories,
-  with interest coverage kept at 100%.
-- **Accuracy on the GitHub-stars benchmark is poor for every semantic variant,** and the
-  popularity baseline wins. The cause is diagnosed, not hidden: retrieval finds under 1%
-  of later-starred repos, and stars skew popular and off-profile. Small sample; see the
-  evaluation doc for the exact numbers and limitations.
+- **Offline benchmark** (24 GitHub users, temporal split of their stars):
+  - **Retrieval is the bottleneck.** Only 1.9% of later-starred repos ever reach the
+    candidate pool. The bridge and exploration query families quadruple that from 0.5%
+    (paired CI above zero), but end-to-end accuracy is ≈ 0 for every ranker.
+  - **D3 vs. relevance-only on accuracy:** no measurable difference
+    (ranking-only recall +0.002 [−0.008, +0.014]).
+  - **Beyond accuracy:** D3 is much more diverse (+0.097 ILD [+0.075, +0.119], higher for
+    23/24 users), recommends ~12× less popular repos, and keeps 100% interest coverage.
+    Novelty without the coverage floor (D1) drops coverage to 0.875.
+  - **Popularity wins the stars benchmark** (recall 0.155 when held-out items are
+    injected), because held-out stars skew popular and off-profile. This is a known bias
+    of the benchmark, reported rather than tuned away.
+- **No human evaluation yet.** Blind A/B tooling is built (`?study` mode plus
+  `detour.eval.study`).
 
 ## Docs
 | | |
