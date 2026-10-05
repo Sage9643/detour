@@ -182,7 +182,7 @@ def _rank_and_log(
 ) -> RunView:
     t = time.perf_counter()
     result = rank(pool, profile, variant, cfg)
-    reasons = {s.repo_id: build_reasons(s, profile, cfg.tau) for s in result.shown}
+    reasons = {s.repo_id: build_reasons(s, profile, cfg.relevance_margin) for s in result.shown}
     timings["ranking_ms"] = _ms(t)
 
     status = RunStatus.DEGRADED if retrieval.degraded else RunStatus.OK
@@ -257,6 +257,7 @@ def _candidate_row(
         "repo_age_days": (now - repo.gh_created_at).days if repo.gh_created_at else None,
         "days_since_push": (now - repo.pushed_at).days if repo.pushed_at else None,
         "interest_sims": s.interest_sims,
+        "relevance_margin": s.relevance_margin,
         "matched_via_exemplar": s.matched_via_exemplar,
         "nearest_negative": s.nearest_negative,
         "diversity_promoted": s.diversity_promoted,
@@ -305,6 +306,7 @@ def _item_view(s: ScoredCandidate, reasons: dict[str, Any]) -> dict[str, Any]:
         },
         "scores": {
             "relevance_raw": _r(s.relevance_raw),
+            "relevance_margin": _r(s.relevance_margin),
             "relevance_norm": _r(s.relevance_norm),
             "novelty": _r(s.novelty),
             "unfamiliarity": _r(s.unfamiliarity),

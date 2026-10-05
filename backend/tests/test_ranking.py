@@ -74,8 +74,8 @@ def test_owner_cap_limits_repos_per_owner() -> None:
 
 def test_gate_excludes_novel_but_irrelevant_item() -> None:
     relevant = item(repo(1, stars=50_000, topics=["machine-learning"]), vec(0.8, 0.6, 0, 0))
-    # Maximally novel: tiny, unknown topic, but cos(U) = 0.1 < tau = 0.18
-    irrelevant = item(repo(2, stars=25, topics=["knitting"]), vec(0.1, 0, 0.995, 0))
+    # Maximally novel: tiny, unknown topic, but margin = cos(U) - background(0) = 0.05 < 0.10
+    irrelevant = item(repo(2, stars=25, topics=["knitting"]), vec(0.05, 0, 0.999, 0))
     p = profile([("ML", U)], known_topics=["machine-learning"])
     cfg = RankerConfig(k=10, beta_novelty=100.0)  # absurd novelty weight on purpose
     for variant in (V.D1_RELEVANCE_NOVELTY, V.D3_FULL):
@@ -145,16 +145,18 @@ def test_negative_feedback_penalizes_near_duplicates_only() -> None:
 
 
 def test_positive_exemplar_adds_relevance_in_full_variant_only() -> None:
-    # Weak interest match (0.15 < tau) but very similar to a repo the user liked.
-    candidate = item(repo(1), vec(0.15, 0, 0.989, 0))
+    # Weak interest match (margin 0.05 < 0.10) but very similar to a repo the user liked.
+    candidate = item(repo(1), vec(0.05, 0, 0.999, 0))
     liked = (55, vec(0.1, 0, 0.995, 0))
     p = profile([("ML", U)], positives=[liked])
-    d3 = rank([candidate], p, V.D3_FULL, RankerConfig())
+    pool = [candidate, *fillers(10)]  # fillers: more ML-relevant, unlike the liked repo
+    d3 = rank(pool, p, V.D3_FULL, RankerConfig())
     s = d3.scored[0]
     assert s.matched_via_exemplar == "liked/r55"
-    assert s.relevance_raw == pytest.approx(0.5 * 0.999, abs=0.01)  # alpha * cos
-    assert d3.shown and d3.shown[0].repo_id == 1
-    d1 = rank([candidate], p, V.D1_RELEVANCE_NOVELTY, RankerConfig())
+    assert s.relevance_raw == pytest.approx(0.995, abs=0.01)  # raw cosine to the liked repo
+    assert s.relevance_norm == pytest.approx(0.5)  # alpha * exemplar percentile 1.0
+    assert 1 in {x.repo_id for x in d3.shown}
+    d1 = rank(pool, p, V.D1_RELEVANCE_NOVELTY, RankerConfig())
     assert d1.scored[0].filter_reason == "below_relevance_gate"
 
 
@@ -166,8 +168,9 @@ def test_interest_weights_apply_only_to_full_variant() -> None:
     assert rank([a, b], p, V.B1_RELEVANCE, RankerConfig(k=1)).shown[0].repo_id == 1
     d3 = rank([a, b], p, V.D3_FULL, RankerConfig(k=1))
     assert d3.shown[0].repo_id == 2
+    # per-interest percentiles: a = (ML 1.0, DS 0.0), b = (ML 0.0, DS 1.0)
     assert d3.scored[0].matched_interest == "ML"
-    assert d3.scored[0].relevance_raw == pytest.approx(0.45, abs=0.01)
+    assert d3.scored[0].relevance_norm == pytest.approx(0.5)  # weight 0.5 * percentile 1.0
 
 
 # --- filters, baselines, determinism -----------------------------------------------------
@@ -245,3 +248,49 @@ def test_shown_positions_are_contiguous_and_logged() -> None:
     assert all(s.shown for s in res.shown)
     unshown = [s for s in res.scored if not s.shown]
     assert all(s.position is None for s in unshown)
+
+
+# --- per-interest calibration (motivated by measured live-pool scales) ------------------------
+
+
+def test_background_margin_gate_is_per_interest() -> None:
+    """Same raw cosine 0.25: relevant for an interest whose background is 0.10, not for
+    one whose background is 0.20 (static-embedding anisotropy differs per interest)."""
+    low_bg = vec(1, 0, 0, 0)
+    high_bg = vec(0, 1, 0, 0)
+    x = item(repo(1), vec(0.25, 0, 0, 0.968))
+    y = item(repo(2), vec(0, 0.25, 0, 0.968))
+    p = profile([("A", low_bg), ("B", high_bg)])
+    p.interests[0] = type(p.interests[0])(label="A", vector=low_bg, weight=1.0, background=0.10)
+    p.interests[1] = type(p.interests[1])(label="B", vector=high_bg, weight=1.0, background=0.20)
+    res = rank([x, y], p, V.D2_RELEVANCE_MMR, RankerConfig())
+    by = {s.repo_id: s for s in res.scored}
+    assert by[1].relevance_margin == pytest.approx(0.15, abs=1e-3)
+    assert by[1].filter_reason is None
+    assert by[2].relevance_margin == pytest.approx(0.05, abs=1e-3)
+    assert by[2].filter_reason == "below_relevance_gate"
+
+
+def test_percentile_relevance_balances_interests_with_different_scales() -> None:
+    """Interest A's repos all score ~0.6 raw, B's ~0.35: raw max would rank every A repo
+    above every B repo; per-interest percentiles interleave them."""
+    a_dir, b_dir = vec(1, 0, 0, 0), vec(0, 1, 0, 0)
+    pool = [item(repo(i), vec(0.60 - 0.01 * i, 0, 0.8, 0)) for i in range(1, 4)]
+    pool += [item(repo(10 + i), vec(0, 0.35 - 0.01 * i, 0, 0.937)) for i in range(1, 4)]
+    p = profile([("A", a_dir), ("B", b_dir)])
+    res = rank(pool, p, V.B1_RELEVANCE, RankerConfig(k=2))
+    assert {s.matched_interest for s in res.shown} == {"A", "B"}
+
+
+def test_coverage_floor_guarantees_each_interest_appears() -> None:
+    a_dir, b_dir = vec(1, 0, 0, 0), vec(0, 1, 0, 0)
+    a_items = [item(repo(i), vec(0.95 - 0.05 * i, 0, 0.3, 0.1 * i)) for i in range(1, 6)]
+    b_item = item(repo(50), vec(0, 0.5, 0.5, 0.707))
+    # B's weight decayed to 0.5 (e.g. after rejections): its best item scores 0.5, below
+    # the top A items (percentiles 1.0, 0.8, 0.6). lambda=1 isolates the floor from MMR.
+    p = profile([("A", a_dir, 1.0), ("B", b_dir, 0.5)])
+    cfg = RankerConfig(k=3, mmr_lambda=1.0, beta_novelty=0.0)
+    no_floor = rank([*a_items, b_item], p, V.D3_FULL, cfg.with_overrides(coverage_floor=False))
+    assert [s.repo_id for s in no_floor.shown] == [1, 2, 3]
+    with_floor = rank([*a_items, b_item], p, V.D3_FULL, cfg)
+    assert [s.repo_id for s in with_floor.shown] == [1, 2, 50]  # only the tail slot changes

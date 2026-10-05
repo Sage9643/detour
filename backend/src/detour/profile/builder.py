@@ -28,6 +28,7 @@ from detour.db.repo_store import load_records
 from detour.enums import FeedbackType
 from detour.ranking.config import RankerConfig
 from detour.ranking.profile import Exemplar, InterestVector, UserProfile
+from detour.representation.background import background_similarity
 from detour.representation.embedder import Embedder
 from detour.representation.interests import GENERIC_TOPICS, resolve_interest
 from detour.representation.store import embed_repos_cached
@@ -103,8 +104,16 @@ def build_profile(
     for row, spec, vec in zip(interests, specs, ivecs, strict=True):
         rejections = state.rejections_by_interest.get(row.id, 0)
         eff = row.weight * interest_multiplier(rejections, cfg)
+        bg = background_similarity(embedder, spec, vec)
         interest_vectors.append(
-            InterestVector(label=row.label, vector=vec, weight=eff, topics=spec.topics, id=row.id)
+            InterestVector(
+                label=row.label,
+                vector=vec,
+                weight=eff,
+                topics=spec.topics,
+                id=row.id,
+                background=bg,
+            )
         )
         interest_snapshot.append(
             {
@@ -114,6 +123,7 @@ def build_profile(
                 "base_weight": row.weight,
                 "effective_weight": round(eff, 4),
                 "rejections": rejections,
+                "background_similarity": round(bg, 4),
                 "topics": list(spec.topics),
             }
         )

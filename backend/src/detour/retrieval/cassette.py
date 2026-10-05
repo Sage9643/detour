@@ -12,6 +12,7 @@ are never part of the key and never written to disk.
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
@@ -28,13 +29,23 @@ def request_key(request: httpx.Request) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:32]
 
 
+def env_http_transport() -> httpx.HTTPTransport:
+    """A real transport that honours HTTPS_PROXY.
+
+    httpx only applies environment proxies when it builds the transport itself; a custom
+    transport (like the recorder below) must be given the proxy explicitly.
+    """
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    return httpx.HTTPTransport(proxy=proxy) if proxy else httpx.HTTPTransport()
+
+
 class RecordingTransport(httpx.BaseTransport):
     """Pass requests to a real transport and save every response."""
 
     def __init__(self, directory: Path, inner: httpx.BaseTransport | None = None) -> None:
         self._dir = directory
         self._dir.mkdir(parents=True, exist_ok=True)
-        self._inner = inner or httpx.HTTPTransport()
+        self._inner = inner or env_http_transport()
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         response = self._inner.handle_request(request)
@@ -48,9 +59,15 @@ class RecordingTransport(httpx.BaseTransport):
         }
         path = self._dir / f"{request_key(request)}.json"
         path.write_text(json.dumps(record), encoding="utf-8")
+        # `body` is already decoded, so encoding/length headers must not be passed on.
+        headers = [
+            (k, v)
+            for k, v in response.headers.items()
+            if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")
+        ]
         return httpx.Response(
             status_code=response.status_code,
-            headers=response.headers,
+            headers=headers,
             content=body,
             request=request,
         )

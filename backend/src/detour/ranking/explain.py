@@ -12,7 +12,7 @@ from detour.enums import QueryFamily
 from detour.ranking.engine import ScoredCandidate, meaningful_topics
 from detour.ranking.profile import UserProfile
 
-STRONG_REL_NORM = 0.8  # top 20% of the candidate pool by relevance
+STRONG_REL_NORM = 0.8  # top 20% of this pool for the matched interest
 UNFAMILIAR_MIN = 0.6  # unfamiliarity at/above this is worth mentioning
 
 
@@ -26,12 +26,13 @@ def popularity_band(stars: int) -> str:
     return "widely used"
 
 
-def build_reasons(s: ScoredCandidate, profile: UserProfile, tau: float) -> dict[str, Any]:
+def build_reasons(s: ScoredCandidate, profile: UserProfile, margin: float) -> dict[str, Any]:
     repo = s.item.candidate.repo
     cand = s.item.candidate
     reasons: dict[str, Any] = {
         "matched_interest": s.matched_interest,
         "relevance_raw": _r(s.relevance_raw),
+        "relevance_margin": _r(s.relevance_margin),
         "relevance_pct": _r(s.relevance_norm),
         "strong_match": bool(s.relevance_norm is not None and s.relevance_norm >= STRONG_REL_NORM),
         "popularity_band": popularity_band(repo.stars),
@@ -41,12 +42,17 @@ def build_reasons(s: ScoredCandidate, profile: UserProfile, tau: float) -> dict[
     if s.matched_via_exemplar:
         reasons["similar_to_liked"] = s.matched_via_exemplar
 
-    # A second interest the repo also clears the relevance gate for.
+    # A second interest the repo ALSO clears the relevance gate for (same margin rule).
+    background = {iv.label: iv.background for iv in profile.interests}
     others = sorted(
-        ((lab, sim) for lab, sim in s.interest_sims.items() if lab != s.matched_interest),
+        (
+            (lab, sim - background.get(lab, 0.0))
+            for lab, sim in s.interest_sims.items()
+            if lab != s.matched_interest
+        ),
         key=lambda x: -x[1],
     )
-    if others and others[0][1] >= tau:
+    if others and others[0][1] >= margin:
         reasons["secondary_interest"] = others[0][0]
 
     new_topics = [t for t in meaningful_topics(repo.topics) if t not in profile.known_topics]

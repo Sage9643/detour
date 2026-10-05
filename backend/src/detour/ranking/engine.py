@@ -4,9 +4,15 @@ Stages (docs/recommendation-engine.md §6):
   filters -> relevance -> relevance gate -> novelty -> negative penalty -> utility
   -> selection (variant-specific; MMR + owner cap for diversified variants)
 
+Relevance (§6.1) is calibrated per interest, because raw cosine scales differ a lot
+between interests with static embeddings (measured on a live pool: mean on-target cosine
+0.39 for "Distributed Systems" vs 0.58 for "Competitive Programming"):
+  gate      margin = cosine - background(interest) >= relevance_margin
+  ranking   rel = max over interests of  weight * percentile of cosine within the pool
+
 Variants share the SAME filtered pool so that comparisons isolate the ranking logic:
   B0  popularity: stars desc                                   (no gate)
-  B1  relevance only: raw cosine desc                          (no gate)
+  B1  relevance only: calibrated relevance desc                (no gate)
   D1  gate -> utility = rel_norm + beta*novelty                (no MMR)
   D2  gate -> utility = rel_norm -> MMR + owner cap
   D3  gate -> utility = rel_norm + beta*novelty - gamma*neg -> MMR + owner cap
@@ -51,8 +57,9 @@ class ScoredCandidate:
     interest_sims: dict[str, float] = field(default_factory=dict)  # raw cosine per interest
     matched_interest: str | None = None
     matched_via_exemplar: str | None = None  # full_name of the INTERESTED repo, if any
-    relevance_raw: float | None = None
-    relevance_norm: float | None = None
+    relevance_raw: float | None = None  # raw cosine to the matched anchor
+    relevance_margin: float | None = None  # raw cosine minus that interest's background
+    relevance_norm: float | None = None  # calibrated relevance in [0, 1] used for ranking
     # novelty
     unfamiliarity: float | None = None
     topical_novelty: float | None = None
@@ -159,33 +166,47 @@ def rank(
     V = np.stack([s.item.vector for s in live]).astype(np.float64)  # (n, d)
 
     # --- relevance -------------------------------------------------------------------
+    n = len(live)
+    rows = np.arange(n)
     U = np.stack([iv.vector for iv in profile.interests]).astype(np.float64)  # (I, d)
     sims = V @ U.T  # (n, I) raw cosine
+    background = np.array([iv.background for iv in profile.interests], dtype=np.float64)
+    margins = sims - background
     weights = np.array(
         [iv.weight if personalize else 1.0 for iv in profile.interests], dtype=np.float64
     )
-    weighted = sims * weights
+    pct = np.stack([rank_normalize(sims[:, j]) for j in range(sims.shape[1])], axis=1)
+    weighted = pct * weights
     best = weighted.argmax(axis=1)
-    rel = weighted[np.arange(len(live)), best]
+    rel = weighted[rows, best]
+    passes_gate = margins[rows, best] >= cfg.relevance_margin
 
-    ex_rel = np.full(len(live), -np.inf)
-    ex_idx = np.zeros(len(live), dtype=int)
+    ex_rel = np.full(n, -np.inf)
+    ex_idx = np.zeros(n, dtype=int)
+    ex_sim = np.zeros(n)
     if personalize and profile.positives:
         P = np.stack([e.vector for e in profile.positives]).astype(np.float64)
         psims = V @ P.T
         ex_idx = psims.argmax(axis=1)
-        ex_rel = cfg.alpha_exemplar * psims[np.arange(len(live)), ex_idx]
+        ex_sim = psims[rows, ex_idx]
+        ex_rel = cfg.alpha_exemplar * rank_normalize(ex_sim)
+        passes_gate = passes_gate | (ex_sim >= cfg.exemplar_gate)
 
-    rel_raw = np.maximum(rel, ex_rel)
-    rel_norm = rank_normalize(rel_raw)
+    via_exemplar = ex_rel > rel
+    rel_score = np.maximum(rel, ex_rel)
     labels = [iv.label for iv in profile.interests]
+    gate_ok: list[bool] = []
     for i, s in enumerate(live):
         s.interest_sims = {lab: round(float(sims[i, j]), 4) for j, lab in enumerate(labels)}
         s.matched_interest = labels[int(best[i])]
-        if ex_rel[i] > rel[i]:
+        s.relevance_margin = float(margins[i, best[i]])
+        if via_exemplar[i]:
             s.matched_via_exemplar = profile.positives[int(ex_idx[i])].full_name
-        s.relevance_raw = float(rel_raw[i])
-        s.relevance_norm = float(rel_norm[i])
+            s.relevance_raw = float(ex_sim[i])
+        else:
+            s.relevance_raw = float(sims[i, best[i]])
+        s.relevance_norm = float(rel_score[i])
+        gate_ok.append(bool(passes_gate[i]))
 
     # --- novelty (computed for every variant so it can be analysed; used by D1/D3) -----
     stars = np.array([s.item.candidate.repo.stars for s in live], dtype=np.float64)
@@ -227,7 +248,7 @@ def rank(
     if variant in GATED:
         eligible_idx = []
         for i, s in enumerate(live):
-            if s.relevance_raw is not None and s.relevance_raw >= cfg.tau:
+            if gate_ok[i]:
                 eligible_idx.append(i)
             else:
                 s.filter_reason = "below_relevance_gate"
@@ -256,7 +277,7 @@ def rank(
         if variant is RankerVariant.B0_POPULARITY:
             return float(s.item.candidate.repo.stars)
         if variant is RankerVariant.B1_RELEVANCE:
-            return float(s.relevance_raw or 0.0)
+            return float(s.relevance_norm or 0.0)
         return float(s.utility or 0.0)
 
     # deterministic: score desc, then github_id asc
@@ -290,9 +311,14 @@ def _mmr(
     cfg: RankerConfig,
     key_for: KeyFn,
 ) -> list[int]:
-    """Greedy Maximal Marginal Relevance with a per-owner cap.
+    """Greedy Maximal Marginal Relevance with a per-owner cap and an interest-coverage floor.
 
     next = argmax  lambda*utility(r) - (1-lambda)*max_{s in S} cos(r, s)
+
+    Coverage floor: MMR removes redundancy but does not guarantee that every interest is
+    represented. When the remaining slots equal the number of still-uncovered interests
+    (that have eligible candidates), selection is restricted to those interests. This only
+    changes the tail of the list, and only when coverage would otherwise be lost.
     """
     n = len(elig)
     if n == 0:
@@ -300,6 +326,7 @@ def _mmr(
     util = np.array([key_for(s) for s in elig], dtype=np.float64)
     ids = np.array([s.repo_id for s in elig])
     owners = [s.item.candidate.repo.owner_login.lower() for s in elig]
+    interest_of = [s.matched_interest for s in elig]
     max_sim = np.zeros(n)  # max similarity to anything selected so far
     available = np.ones(n, dtype=bool)
     owner_count: dict[str, int] = {}
@@ -310,6 +337,13 @@ def _mmr(
         allowed = available & np.array([owner_count.get(o, 0) < cfg.owner_cap for o in owners])
         if not allowed.any():
             break
+        if cfg.coverage_floor:
+            covered = {interest_of[j] for j in chosen}
+            uncovered = {interest_of[j] for j in np.flatnonzero(allowed)} - covered
+            if uncovered and cfg.k - len(chosen) <= len(uncovered):
+                restricted = allowed & np.array([i in uncovered for i in interest_of])
+                if restricted.any():
+                    allowed = restricted
         score = lam * util - (1.0 - lam) * max_sim
         cand = np.flatnonzero(allowed)
         # deterministic tie-break: highest score, then smallest github_id

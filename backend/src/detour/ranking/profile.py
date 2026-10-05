@@ -14,6 +14,9 @@ class InterestVector:
     vector: Vectors  # (dim,)
     weight: float  # effective weight after feedback-derived decay (1.0 = neutral)
     topics: tuple[str, ...] = ()
+    # Mean cosine between this interest and unrelated topic descriptions: the similarity an
+    # off-topic repository typically gets. Differs a lot per interest with static embeddings.
+    background: float = 0.0
     id: uuid.UUID | None = None
 
 

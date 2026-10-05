@@ -71,10 +71,10 @@ def test_explanation_claims_match_scores() -> None:
     p = profile([("ML", u_ml), ("DS", u_ds)], known_topics=["machine-learning"])
     res = _ranked([a, b], p, k=2)
     s = next(x for x in res.shown if x.repo_id == 1)
-    reasons = build_reasons(s, p, tau=0.18)
+    reasons = build_reasons(s, p, margin=0.10)
 
     assert reasons["matched_interest"] == "ML"
-    assert reasons["secondary_interest"] == "DS"  # cos 0.6 >= tau
+    assert reasons["secondary_interest"] == "DS"  # margin 0.6 >= 0.10
     assert reasons["strong_match"] == (s.relevance_norm is not None and s.relevance_norm >= 0.8)
     assert reasons["new_topics"] == ["federated-learning"]  # generic 'python' never claimed
     assert reasons["bridge"] == ["ML", "DS"]
@@ -90,22 +90,23 @@ def test_explanation_claims_match_scores() -> None:
     assert "Less-known project (150 stars)." in text
 
     other = next(x for x in res.scored if x.repo_id == 2)
-    r2 = build_reasons(other, p, tau=0.18)
-    assert "secondary_interest" not in r2  # cos(DS) = 0 < tau
+    r2 = build_reasons(other, p, margin=0.10)
+    assert "secondary_interest" not in r2  # margin(DS) = 0 < 0.10
     assert "new_topics" not in r2  # only a known topic
     assert not any("Less-known" in line for line in render(r2))
 
 
 def test_exemplar_and_unfamiliarity_explanations() -> None:
     cand = item(repo(1), vec(0.15, 0, 0.989, 0))
+    more_ml = [item(repo(10 + i), vec(0.5 + 0.05 * i, 0.866, 0, 0)) for i in range(3)]
     p = profile(
         [("ML", vec(1, 0, 0, 0))],
         positives=[(55, vec(0.1, 0, 0.995, 0))],
         known=[(55, vec(0.1, 0, 0.995, 0)), (56, vec(0, 1, 0, 0))],
     )
-    res = _ranked([cand], p)
-    s = res.shown[0]
-    reasons = build_reasons(s, p, tau=0.18)
+    res = _ranked([cand, *more_ml], p)
+    s = next(x for x in res.scored if x.repo_id == 1)
+    reasons = build_reasons(s, p, margin=0.10)
     assert reasons["similar_to_liked"] == "liked/r55"
     assert render(reasons)[0] == "Similar to liked/r55, which you marked as interesting."
     # it is near a known repo, so it must NOT be called unfamiliar

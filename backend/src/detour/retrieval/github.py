@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from detour.retrieval.cassette import CassetteMiss
 from detour.retrieval.models import RepoRecord
 
 logger = logging.getLogger(__name__)
@@ -143,8 +144,10 @@ class GitHubClient:
                 with self._lock:
                     self.calls += 1
                 response = self._http.get(path, params=params, headers=headers)
-            except httpx.TransportError as exc:  # timeouts, DNS, connection, cassette miss
+            except httpx.HTTPError as exc:  # timeouts, DNS, connection, decoding, cassette miss
                 last_error = exc
+                if isinstance(exc, CassetteMiss):  # deterministic: retrying cannot help
+                    raise GitHubUnavailable(f"not in recording: {path}") from exc
                 logger.warning("github request failed path=%s error=%s", path, type(exc).__name__)
                 if attempt == 0:
                     time.sleep(_RETRY_DELAY_S)
@@ -154,7 +157,10 @@ class GitHubClient:
             self._update_rate(rate, response)
             status = response.status_code
             if status == 200:
-                return response.json()
+                try:
+                    return response.json()
+                except ValueError as exc:
+                    raise GitHubUnavailable(f"GitHub returned invalid JSON for {path}") from exc
             if status in (403, 429) and self._is_rate_limited(response):
                 raise GitHubRateLimited(rate.reset_at)
             if status == 422:

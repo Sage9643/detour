@@ -292,3 +292,10 @@ class CandidateRetriever:
         except GitHubError as exc:
             logger.warning("github search failed label=%s error=%s", pq.label, exc)
             return None, str(exc), (time.perf_counter() - t0) * 1000
+        except Exception as exc:  # defensive: one broken query must not fail the request
+            logger.exception("unexpected error in github search label=%s", pq.label)
+            return (
+                None,
+                f"unexpected error: {type(exc).__name__}",
+                (time.perf_counter() - t0) * 1000,
+            )

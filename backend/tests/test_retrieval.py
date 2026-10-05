@@ -246,3 +246,43 @@ def test_build_transport_modes(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         build_transport("bogus", str(tmp_path))
     assert issubclass(CassetteMiss, httpx.TransportError)
+
+
+def test_recording_transport_strips_encoding_headers_of_decoded_body(tmp_path: Path) -> None:
+    import gzip
+
+    payload = json.dumps({"total_count": 0, "items": []}).encode()
+
+    def gz(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, headers={"content-encoding": "gzip"}, content=gzip.compress(payload)
+        )
+
+    gh = GitHubClient(
+        base_url="https://x.test",
+        transport=RecordingTransport(tmp_path, inner=httpx.MockTransport(gz)),
+    )
+    assert gh.search_repositories("a").total_count == 0
+
+
+def test_malformed_response_is_unavailable_not_a_crash() -> None:
+    gh = client_for(lambda r: httpx.Response(200, content=b"<html>not json"))
+    with pytest.raises(GitHubUnavailable):
+        gh.search_repositories("a")
+
+
+def test_unexpected_error_in_one_query_degrades_instead_of_crashing() -> None:
+    fake = FakeGitHub()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "Machine" in str(request.url) or "machine" in str(request.url):
+            raise RuntimeError("boom")
+        return fake.handle(request)
+
+    gh = GitHubClient(base_url="https://x.test", transport=httpx.MockTransport(handler))
+    retriever = CandidateRetriever(gh, MemorySearchCache(), cache_ttl_s=3600)
+    specs = [resolve_interest("Distributed Systems"), resolve_interest("Machine Learning")]
+    out = retriever.retrieve(specs, set(), RetrievalConfig())
+    assert out.degraded
+    assert any(q.source == "failed" for q in out.queries)
+    assert out.candidates
