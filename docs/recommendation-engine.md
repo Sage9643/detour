@@ -120,8 +120,10 @@ name.
 All vectors are L2-normalized, so cosine similarity is a dot product.
 
 ### 6.0 Filters (every variant)
-A candidate is removed if it is archived, a fork, has no description and no topics, has
-fewer than 20 stars, is already in `K`, or was shown recently. Every filtered candidate
+A candidate is removed if it is archived, a fork, has no description and no topics, has a
+description longer than 1,000 characters (keyword-stuffed spam; live bridge results
+contained 260 KB descriptions), has fewer than 20 stars, is already in `K`, or was shown
+recently. Every filtered candidate
 is still logged, with its `filter_reason`.
 
 ### 6.1 Relevance: calibrated per interest

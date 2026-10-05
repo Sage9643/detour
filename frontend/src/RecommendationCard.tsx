@@ -7,6 +7,8 @@ interface Props {
   pending?: boolean;
   compact?: boolean;
   highlight?: boolean;
+  /** Blind study: hide everything that could reveal which system produced the item. */
+  neutral?: boolean;
   onFeedback?: (type: FeedbackType) => void;
 }
 
@@ -29,9 +31,9 @@ function Signal({ label, value, hint, tone }: { label: string; value: number | n
   );
 }
 
-export function RecommendationCard({ rec, feedback, pending, compact, highlight, onFeedback }: Props) {
+export function RecommendationCard({ rec, feedback, pending, compact, highlight, neutral, onFeedback }: Props) {
   const { repo, scores } = rec;
-  const family = primaryFamily(rec.query_families);
+  const family = neutral ? "core" : primaryFamily(rec.query_families);
   return (
     <article className={`card family-${family}${highlight ? " card-highlight" : ""}`}>
       <header className="card-head">
@@ -42,7 +44,7 @@ export function RecommendationCard({ rec, feedback, pending, compact, highlight,
           <p className="card-meta">
             <span>{formatStars(repo.stars)} stars</span>
             {repo.language && <span>{repo.language}</span>}
-            <span className={`family family-text-${family}`}>{FAMILY_LABEL[family]}</span>
+            {!neutral && <span className={`family family-text-${family}`}>{FAMILY_LABEL[family]}</span>}
           </p>
         </div>
       </header>

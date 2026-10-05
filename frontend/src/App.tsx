@@ -250,6 +250,7 @@ export default function App() {
                       key={rec.repo.github_id}
                       rec={rec}
                       compact
+                      neutral
                       feedback={feedback[rec.repo.github_id]}
                       pending={pendingRepo === rec.repo.github_id}
                       onFeedback={(t) => sendFeedback(rec.repo.github_id, t, list.run_id)}

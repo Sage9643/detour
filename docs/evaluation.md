@@ -136,10 +136,12 @@ under every option.
 |---|---|---|---|---|---|---|
 | DS, ML, CP (before calibration) | 176 | 6 | 8 | degraded (4 of 9 searches rate-limited) | 1982 ms | 178 ms |
 | DS, ML | 182 | 40 | 8 | ok | 3571 ms | 270 ms |
-| Backend, Databases, Observability | 284 | 39 | 8 | ok | 4710 ms | – |
+| Backend, Databases, Observability | 284 | 39 | 8 | ok | 4710 ms | 361 ms |
 
-**Overlap between the D3 and B1 lists on the same pool:** 2/8 in both runs where it was
-measured.
+**Overlap between the D3 and B1 lists on the same pool:**
+- DS/ML/CP: 4/8 (engine before calibration); 2/8 when the same recording was replayed after calibration
+- DS/ML: 2/8 (median stars D3 645 vs. B1 7,516)
+- Backend/DB/Observability: 0/8 (median stars D3 85 vs. B1 2,315)
 
 **After feedback,** in the second request for the DS/ML user:
 - the two known repos were filtered (`already_known`), as were the 10 shown before;

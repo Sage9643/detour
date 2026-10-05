@@ -334,20 +334,13 @@ def test_blind_study_feedback_is_attributed_to_each_system(
     uid = new_user(client)
     body = recommend(client, uid, k=4, compare_variant="B1")
     d3, b1 = body["run"], body["comparison"]
-    # rate the first item of each list from within that list (as the study UI does)
-    assert (
-        feedback(
-            client, uid, d3["items"][0]["repo"]["github_id"], "INTERESTED", d3["run_id"]
-        ).status_code
-        == 201
-    )
-    b1_only = [
-        i
-        for i in b1["items"]
-        if i["repo"]["github_id"] not in {x["repo"]["github_id"] for x in d3["items"]}
-    ]
-    target = (b1_only or b1["items"])[0]["repo"]["github_id"]
-    assert feedback(client, uid, target, "NOT_INTERESTED", b1["run_id"]).status_code == 201
+    # rate one item unique to each list, from within that list (as the study UI does)
+    d3_set = {x["repo"]["github_id"] for x in d3["items"]}
+    b1_set = {x["repo"]["github_id"] for x in b1["items"]}
+    d3_only, b1_only = sorted(d3_set - b1_set), sorted(b1_set - d3_set)
+    assert d3_only and b1_only, "fixture should produce lists that differ"
+    assert feedback(client, uid, d3_only[0], "INTERESTED", d3["run_id"]).status_code == 201
+    assert feedback(client, uid, b1_only[0], "NOT_INTERESTED", b1["run_id"]).status_code == 201
 
     out = analyse(clean_db)
     assert out["pairs"] == 1
@@ -356,3 +349,21 @@ def test_blind_study_feedback_is_attributed_to_each_system(
     assert out["d3_wins"] == 1 and out["d3_losses"] == 0
     lo, hi = wilson(8, 10)
     assert 0.44 < lo < 0.5 and 0.94 < hi < 0.98
+
+
+def test_study_rating_of_a_repo_shown_in_both_lists_counts_for_both(
+    client: TestClient, clean_db: Engine
+) -> None:
+    from detour.eval.study import analyse
+
+    uid = new_user(client)
+    body = recommend(client, uid, k=6, compare_variant="B1")
+    d3, b1 = body["run"], body["comparison"]
+    shared = {i["repo"]["github_id"] for i in d3["items"]} & {
+        i["repo"]["github_id"] for i in b1["items"]
+    }
+    assert shared, "fixture should produce overlapping lists"
+    feedback(client, uid, next(iter(shared)), "ALREADY_KNOW", b1["run_id"])
+    out = analyse(clean_db)
+    assert out["per_variant"]["D3"]["ALREADY_KNOW"] == 1
+    assert out["per_variant"]["B1"]["ALREADY_KNOW"] == 1

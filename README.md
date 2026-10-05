@@ -35,8 +35,9 @@ interests ─► GitHub search: core / bridge / adjacent-topic queries ─► ~1
   38% of off-topic candidates through the gate and ranked zero repos for one interest.
   The per-interest background-margin gate lets 6% through, keeps 94% of on-topic
   candidates, and balances the interests (8/8/8 in the top 24).
-- **Diversity:** D3 raises intra-list diversity over B1 on every evaluated user, with
-  the bootstrap CI excluding zero. Interest coverage stays at 100%.
+- **Diversity and popularity:** on the offline benchmark, D3 raises intra-list diversity
+  over B1 (paired bootstrap CI above zero) and recommends far less popular repositories,
+  with interest coverage kept at 100%.
 - **Accuracy on the GitHub-stars benchmark is poor for every semantic variant,** and the
   popularity baseline wins. The cause is diagnosed, not hidden: retrieval finds under 1%
   of later-starred repos, and stars skew popular and off-profile. Small sample; see the

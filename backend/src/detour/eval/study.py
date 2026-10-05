@@ -64,15 +64,25 @@ def analyse(engine: Engine) -> dict[str, Any]:
             )
         ):
             shown.setdefault(run_id, set()).add(repo_id)
-        # latest feedback per (run, repo)
-        latest: dict[tuple[uuid.UUID, int], str] = {}
+        # A repo shown in BOTH lists is rated once (the UI shares the rating), so the latest
+        # rating given in either run of a pair applies to the repo in both runs.
+        pair_of = {}
+        for p in pairs:
+            pair_of[p.d3] = pair_of[p.other] = p.d3
+        latest_in_pair: dict[tuple[uuid.UUID, int], str] = {}
         for fb_run, fb_repo, ftype in s.execute(
             select(Feedback.run_id, Feedback.repo_id, Feedback.type)
             .where(Feedback.run_id.in_(run_ids))
             .order_by(Feedback.created_at, Feedback.id)
         ):
             if fb_run is not None:
-                latest[(fb_run, fb_repo)] = ftype
+                latest_in_pair[(pair_of[fb_run], fb_repo)] = ftype
+        latest = {
+            (run, repo): t
+            for run in run_ids
+            for (pair, repo), t in latest_in_pair.items()
+            if pair_of[run] == pair
+        }
 
     def counts(run_id: uuid.UUID) -> dict[str, int]:
         c = {t.value: 0 for t in FeedbackType} | {"shown": len(shown.get(run_id, ()))}
