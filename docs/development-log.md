@@ -46,3 +46,52 @@ container was not booted** in this environment.
   `(user_id, lower(label))` index. Removed.
 - Starlette now deprecates plain `httpx` for `TestClient`; switched the dev dependency
   to `httpx2`.
+
+## 2026-10-05: Phases 2–12 (autonomous build)
+
+**Environment constraints found (and how they were handled):**
+- Hugging Face was unreachable from both sandboxes, so a transformer embedding model could
+  not be downloaded. Chose WordLlama, whose weights ship inside its PyPI wheel (D-010).
+- The cloud workspace could not call GitHub search; the linked machine's sandbox could
+  (unauthenticated). Built a record/replay transport (D-015): live runs on the linked
+  machine, replayed runs in the cloud.
+- Docker Hub was blocked, so container images were never built. Deployment uses Render's
+  native Python runtime, with commands verified locally (D-016).
+- GitHub's stargazers endpoint now requires authentication, so the evaluation samples
+  users from the owners of seed repositories' newest forks instead.
+
+**Built:** retrieval (planner, client, cache, degradation), representation (interest
+dictionary, text, embeddings, cache), pure ranking engine (B0–D3), explanations, profile
+from the feedback log, API, demo/smoke tool, offline evaluation (collector, metrics,
+runner, sweep), React frontend, Render/Vercel config, CI frontend job.
+
+**Live end-to-end run** (linked machine; real GitHub, Postgres, uvicorn; 3 interests):
+176 candidates, 8 shown, cold total 1982 ms. 4 of 9 searches were rate-limited, and the
+run was correctly marked *degraded*. After feedback (one each of ALREADY_KNOW, INTERESTED,
+NOT_INTERESTED), the second run used 0 GitHub calls and 176/176 cached embeddings,
+filtered the two known repos and the 10 already-shown ones, and returned a different
+list.
+
+**Bugs found by the live run and fixed:**
+1. The recording transport passed `content-encoding: gzip` along with an already-decoded
+   body, which caused a 500. It now strips encoding headers.
+2. A custom httpx transport ignores `HTTPS_PROXY`; the proxy is now passed explicitly.
+3. An unexpected exception in one query became a 500. It now degrades only that query.
+   Regression tests were added for all three.
+
+**Design change driven by data (D-012):** raw-cosine ranking returned zero
+distributed-systems repos because per-interest similarity scales differ (0.39 vs 0.58).
+Replaced it with a background-margin gate plus per-interest percentile ranking. On the
+same pool: off-target gate pass 38% → 6%, top-24 interest mix 14/0/10 → 8/8/8. Added the
+MMR interest-coverage floor (D-013).
+
+**Determinism bug:** interests created in one transaction share `created_at`, so their
+order (and therefore the bridge query text and cache keys) depended on random UUIDs.
+Query planning now uses a canonical alphabetical order.
+
+**Tests:** grew from 51 to 130+ backend tests. These include deterministic hand-computed
+ranking tests, end-to-end API tests on real Postgres with the real embedder and a fake
+GitHub transport, failure-path tests, and explanation-claim tests. 7 frontend unit
+tests. The UI was driven end-to-end with Playwright, with screenshots reviewed.
+
+**Evaluation:** see `evaluation.md` §7 for the measured numbers and their limitations.

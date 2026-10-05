@@ -128,7 +128,11 @@ def list_metrics(
 
 
 def evaluate_user(
-    ex: dict[str, Any], pool_doc: dict[str, Any], embedder: Embedder, cfg: RankerConfig
+    ex: dict[str, Any],
+    pool_doc: dict[str, Any],
+    embedder: Embedder,
+    cfg: RankerConfig,
+    variants: Sequence[RankerVariant] = VARIANTS,
 ) -> dict[str, Any]:
     known = _records(ex["known"])
     heldout_recs = _records(ex["heldout"])
@@ -189,7 +193,7 @@ def evaluate_user(
     for name, fams in FAMILY_SETS.items():
         ids = [i for i, c in candidates.items() if c.families & fams]
         result["pool_recall"][name] = len(set(ids) & heldout) / len(heldout)
-        if name != "all":
+        if name != "all" and RankerVariant.D3_FULL in variants:
             res = rank(items(ids), profile, RankerVariant.D3_FULL, cfg)
             result["ablation_end_to_end_D3"][name] = list_metrics(
                 res.shown, heldout, serendipitous, ex["interests"], profile.known_vectors, cfg.k
@@ -197,7 +201,7 @@ def evaluate_user(
 
     pool_ids = sorted(candidates)
     injected_ids = sorted(set(pool_ids) | heldout)
-    for variant in VARIANTS:
+    for variant in variants:
         for protocol, ids in (("end_to_end", pool_ids), ("ranking_only", injected_ids)):
             res = rank(items(ids), profile, variant, cfg)
             m = list_metrics(
@@ -207,8 +211,42 @@ def evaluate_user(
             m["recall_on_profile"] = recall_at_k(top, on_profile, cfg.k)
             m["recall_long_tail"] = recall_at_k(top, long_tail, cfg.k)
             result[protocol][variant.value] = m
-    result["ablation_end_to_end_D3"]["all"] = result["end_to_end"]["D3"]
+    if "D3" in result["end_to_end"]:
+        result["ablation_end_to_end_D3"]["all"] = result["end_to_end"]["D3"]
     return result
+
+
+def sweep(
+    examples: list[dict[str, Any]],
+    pools: dict[str, dict[str, Any]],
+    embedder: Embedder,
+    base: RankerConfig,
+) -> list[dict[str, Any]]:
+    """D3 relevance-diversity-novelty tradeoff over (lambda, beta), end-to-end protocol for
+    list properties and ranking-only protocol for held-out recall."""
+    grid = [(lam, beta) for lam in (0.3, 0.5, 0.7, 0.85, 1.0) for beta in (0.0, 0.3, 0.6)]
+    rows = []
+    for lam, beta in grid:
+        cfg = base.with_overrides(mmr_lambda=lam, beta_novelty=beta)
+        per_user = [
+            evaluate_user(ex, pools[ex["user"]], embedder, cfg, variants=[RankerVariant.D3_FULL])
+            for ex in examples
+            if ex["user"] in pools
+        ]
+        row: dict[str, Any] = {"mmr_lambda": lam, "beta_novelty": beta}
+        for protocol, metric in (
+            ("end_to_end", "ild"),
+            ("end_to_end", "interest_coverage"),
+            ("end_to_end", "mean_log10_stars"),
+            ("end_to_end", "unfamiliarity"),
+            ("ranking_only", "recall"),
+            ("ranking_only", "recall_on_profile"),
+        ):
+            row[f"{protocol}.{metric}"] = bootstrap_ci(
+                [u[protocol]["D3"][metric] for u in per_user]
+            )[0]
+        rows.append(row)
+    return rows
 
 
 def aggregate(users: list[dict[str, Any]]) -> dict[str, Any]:
@@ -255,22 +293,24 @@ def main() -> None:
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--k", type=int, default=10)
+    ap.add_argument("--sweep", action="store_true", help="also sweep D3's lambda and beta")
     args = ap.parse_args()
     data = Path(args.data)
     examples = json.loads((data / "examples.json").read_text(encoding="utf-8"))
     state = json.loads((data / "state.json").read_text(encoding="utf-8"))
     embedder = default_embedder()
     cfg = RankerConfig(k=args.k)
-    users = []
-    for ex in examples:
-        pool_path = data / "pools" / f"{ex['user']}.json"
-        if not pool_path.exists():
-            continue
-        pool = json.loads(pool_path.read_text(encoding="utf-8"))
-        users.append(evaluate_user(ex, pool, embedder, cfg))
+    pools = {
+        p.stem: json.loads(p.read_text(encoding="utf-8")) for p in (data / "pools").glob("*.json")
+    }
+    users = [
+        evaluate_user(ex, pools[ex["user"]], embedder, cfg)
+        for ex in examples
+        if ex["user"] in pools
+    ]
     if not users:
         raise SystemExit("no users with pools")
-    report = {
+    report: dict[str, Any] = {
         "generated_at": datetime.now(UTC).isoformat(),
         "engine_version": ENGINE_VERSION,
         "embedding_model": embedder.model_name,
@@ -286,8 +326,16 @@ def main() -> None:
         "aggregate": aggregate(users),
         "per_user": users,
     }
+    if args.sweep:
+        report["sweep_D3"] = sweep(examples, pools, embedder, cfg)
     Path(args.out).write_text(json.dumps(report, indent=1), encoding="utf-8")
     print(render_summary(report))
+    if args.sweep:
+        print("\nD3 sweep: lambda beta | ILD coverage log10stars unfamiliarity | recall on-profile")
+        sweep_rows: list[dict[str, float]] = report["sweep_D3"]
+        for r in sweep_rows:
+            vals = "  ".join(f"{v:.3f}" for k, v in r.items() if "." in k)
+            print(f"  {r['mmr_lambda']:.2f} {r['beta_novelty']:.1f}  {vals}")
 
 
 def render_summary(report: dict[str, Any]) -> str:

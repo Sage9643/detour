@@ -32,6 +32,7 @@ export const FILTER_LABEL: Record<string, string> = {
   archived: "archived",
   fork: "forks",
   no_text: "no description",
+  suspicious_description: "spam-like descriptions",
   below_star_floor: "under 20 stars",
 };
 

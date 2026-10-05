@@ -8,6 +8,7 @@ Ranking parameters live in detour.ranking.config.RankerConfig, not here: they ar
 the experiment definition and are logged with every run.
 """
 
+from datetime import date
 from enum import StrEnum
 from functools import lru_cache
 
@@ -49,6 +50,9 @@ class Settings(BaseSettings):
     #   replay  never touch the network; serve only recorded responses
     github_cassette_mode: str = Field(default="off", alias="DETOUR_GITHUB_CASSETTE_MODE")
     github_cassette_dir: str | None = Field(default=None, alias="DETOUR_GITHUB_CASSETTE_DIR")
+    # Pin the date used in search qualifiers (pushed:>date-365d). Only for replaying a
+    # recording made on that date; leave unset in normal operation.
+    as_of_date: date | None = Field(default=None, alias="DETOUR_AS_OF_DATE")
 
     # --- HTTP -------------------------------------------------------------------------
     # Comma-separated list of allowed browser origins (the Vercel frontend URL in prod).

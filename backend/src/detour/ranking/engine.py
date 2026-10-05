@@ -36,6 +36,8 @@ from detour.retrieval.models import Candidate
 
 Floats = npt.NDArray[np.float64]
 
+MAX_DESCRIPTION_CHARS = 1000
+
 GATED = {RankerVariant.D1_RELEVANCE_NOVELTY, RankerVariant.D2_RELEVANCE_MMR, RankerVariant.D3_FULL}
 DIVERSIFIED = {RankerVariant.D2_RELEVANCE_MMR, RankerVariant.D3_FULL}
 NOVELTY_USED = {RankerVariant.D1_RELEVANCE_NOVELTY, RankerVariant.D3_FULL}
@@ -126,6 +128,10 @@ def _filter_reason(c: Candidate, profile: UserProfile, cfg: RankerConfig) -> str
         return "fork"
     if not (r.description and r.description.strip()) and not r.topics:
         return "no_text"
+    if r.description and len(r.description) > MAX_DESCRIPTION_CHARS:
+        # Observed in live results: keyword-stuffed spam repos with 260 KB descriptions
+        # matching bridge queries. Legitimate descriptions are a sentence or two.
+        return "suspicious_description"
     if r.stars < cfg.star_floor:
         return "below_star_floor"
     if r.github_id in profile.known_ids:

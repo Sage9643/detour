@@ -183,6 +183,7 @@ def test_interest_weights_apply_only_to_full_variant() -> None:
         ({"fork": True}, "fork"),
         ({"description": None}, "no_text"),
         ({"stars": 3}, "below_star_floor"),
+        ({"description": "keyword " * 200}, "suspicious_description"),
     ],
 )
 def test_filters_apply_to_every_variant(kwargs: dict, reason: str) -> None:

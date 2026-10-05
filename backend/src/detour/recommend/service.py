@@ -68,6 +68,7 @@ class Deps:
     github: GitHubClient
     embedder: Embedder
     cache_ttl_s: int
+    as_of: datetime | None = None  # pinned "now" for retrieval (replay of recordings only)
     retrieval_cfg: RetrievalConfig = field(default_factory=RetrievalConfig)
     ranker_cfg: RankerConfig = field(default_factory=RankerConfig)
 
@@ -101,7 +102,9 @@ def recommend(
     t = time.perf_counter()
     retriever = CandidateRetriever(deps.github, DbSearchCache(session), deps.cache_ttl_s)
     try:
-        retrieval = retriever.retrieve(specs, set(profile.known_topics), deps.retrieval_cfg)
+        retrieval = retriever.retrieve(
+            specs, set(profile.known_topics), deps.retrieval_cfg, now=deps.as_of
+        )
     except RetrievalFailed as exc:
         timings["retrieval_ms"] = _ms(t)
         _log_failed_run(session, user_id, variant, cfg, deps, snapshot, timings, str(exc))

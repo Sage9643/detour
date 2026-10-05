@@ -7,6 +7,7 @@ Tests build apps via create_app(settings, ...) with their own settings and depen
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, time
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -56,6 +57,11 @@ def create_app(
             github=client,
             embedder=embedder or default_embedder(),
             cache_ttl_s=settings.search_cache_ttl_s,
+            as_of=(
+                datetime.combine(settings.as_of_date, time(12), tzinfo=UTC)
+                if settings.as_of_date
+                else None
+            ),
         )
         logger.info(
             "startup github_authenticated=%s cassette=%s embedder=%s",

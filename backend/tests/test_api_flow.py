@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, func, select, text
+from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
 from detour.config import Settings
@@ -23,18 +23,6 @@ from .fake_github import FakeGitHub
 pytestmark = pytest.mark.db
 
 INTERESTS = [{"label": "Distributed Systems"}, {"label": "Machine Learning"}]
-
-
-@pytest.fixture
-def clean_db(engine: Engine) -> Engine:
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                "TRUNCATE feedback, run_candidates, recommendation_runs, interests, users, "
-                "repo_embeddings, search_cache, repositories CASCADE"
-            )
-        )
-    return engine
 
 
 @pytest.fixture

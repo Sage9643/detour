@@ -1,252 +1,296 @@
-# Recommendation Engine Specification
+# Recommendation Engine
 
-> Status: **specification (v0.1, Phase 1)**. Nothing in this document has been
-> implemented or measured yet. All numeric parameters below are **starting hypotheses**,
-> marked ⚙️, to be calibrated or swept in the phase indicated. No result in this file is
-> an experimental finding; findings go in `evaluation.md` once measured.
+> Status: **implemented** (engine version 1.0.0). This document describes what the code
+> does. Parameters marked ⚙️ are starting hypotheses, not tuned values; the parameter
+> register (§11) says how each one was chosen. Measured results live in `evaluation.md`.
+
+Code map: `retrieval/` (planner, GitHub client, cache) → `representation/` (interest
+expansion, repo text, embeddings) → `ranking/engine.py` (pure ranking) →
+`ranking/explain.py` → `recommend/service.py` (orchestration + logging) →
+`profile/` (feedback → profile).
 
 ## 1. Goal
 
-Recommend GitHub repositories that are:
+Recommend GitHub repositories that are
 
 1. **relevant** to the user's interests,
 2. **unfamiliar** to the user (novelty), and
 3. **different from each other** within a list (diversity),
 
-and adapt to explicit feedback (personalization). Every recommendation carries an
-explanation derived from the logged scoring features.
+adapt to explicit feedback, and explain every pick from the signals that produced it.
 
-**Novelty and diversity are different properties.**
-- **Novelty** is a property of an *item relative to a user*: is it new to them?
-- **Diversity** is a property of a *list*: are its items different from each other?
+Novelty and diversity are different properties and live in different stages:
 
-They are therefore computed at different stages.
+- **Novelty** belongs to an item relative to a user ("is this new to them?"). It is an
+  item-level score.
+- **Diversity** belongs to a list ("are these different from each other?"). It is handled
+  by list-level reranking.
 
 ## 2. Pipeline
 
 ```
-Profile ─► Query planner ─► GitHub search (cached) ─► Candidate pool (~150–300)
-        ─► Filters ─► Representation/embeddings ─► Relevance ─► Relevance gate
-        ─► Novelty components ─► Negative penalty ─► Utility
-        ─► Diversity rerank (MMR + owner cap) ─► Top-K ─► Structured reasons
-        ─► Log run + ALL candidates ─► Feedback ─► Profile update
+profile (interests, weights, exemplars, known set)          profile/builder.py
+  └─► query planner: core / bridge / adjacent               retrieval/planner.py
+        └─► GitHub search (cache → live → stale)            retrieval/service.py
+              └─► candidate pool, deduped, ~150–300         (families remembered)
+                    └─► embeddings (content-hash cache)     representation/store.py
+                          └─► filters → relevance → gate → novelty → negative penalty
+                                → utility → MMR + owner cap + coverage floor     ranking/engine.py
+                                └─► structured reasons → text                     ranking/explain.py
+                                      └─► log run + EVERY candidate               recommend/service.py
+feedback (append-only) ─► next profile
 ```
 
 **Candidate generation and ranking are separate problems.** Ranking can only reorder what
-retrieval returned. Retrieval quality is therefore measured on its own (pool recall,
-§9), separately from ranking quality.
+retrieval returned. The offline evaluation measures retrieval recall separately, and that
+measurement shows retrieval is currently the bottleneck (`evaluation.md`).
 
-## 3. User representation
-
-A **set** of interest vectors, never a single averaged vector.
+## 3. User representation (`ranking/profile.py`, `profile/builder.py`)
 
 | Component | Contents | Source |
 |---|---|---|
-| Interests | label, expanded text, embedding, weight `w_i` (default 1), active flag | user input |
-| Positive exemplars | embeddings of repos marked INTERESTED | feedback |
-| Negative exemplars | embeddings of repos marked NOT_INTERESTED | feedback |
-| Known set `K` | repos marked ALREADY_KNOW or INTERESTED; optionally the user's GitHub stars | feedback / optional username |
-| Known topics `T_K` | topics mapped from interests, plus topics of repos in `K` | derived |
+| Interests | label, embedded expansion, **background similarity**, effective weight | user input + curated dictionary |
+| Positive exemplars | embeddings of repos whose latest feedback is INTERESTED | feedback |
+| Negative exemplars | embeddings of repos whose latest feedback is NOT_INTERESTED | feedback |
+| Known set `K` | INTERESTED and ALREADY_KNOW repos | feedback |
+| Known topics `T_K` | curated topics of the interests, plus topics of repos in `K` | derived |
+| Recently shown | repos shown to the user in the last 14 days ⚙️ | run log |
 
-**Why a set:** the centroid of unrelated interests (e.g. ML and competitive programming)
-is a point that matches neither. Keeping vectors separate also preserves which interest
-matched, which the explanations need.
+- **A set of interest vectors, never one average.** The average of unrelated interests
+  matches none of them, and keeping them separate lets every pick name the interest it
+  matched.
+- **Interest expansion.** 34 curated interests map aliases (e.g. "ml", "cp", "k8s") to an
+  embedded description, a keyword query, a bridge term and GitHub topic slugs. Unknown
+  labels fall back to the raw text. Users can override the expansion. No LLM is involved.
+- **The profile is derived, not mutated.** It is rebuilt from the append-only feedback log
+  on every request, and the latest event per repository wins. Changing your mind therefore
+  works, and the exact profile each run used is stored in `profile_snapshot`.
 
-**Interest expansion:** short labels ("ML", "CP") embed poorly. Each label is expanded
-to a short description before embedding, using a curated dictionary with raw-text
-fallback. The user can edit the expansion. No LLM is involved.
+## 4. Repository representation (`representation/text.py`)
 
-## 4. Repository representation
+- **Embedded text:** the name split into words (`raft-rs` → "raft rs"), the description
+  (first 400 characters), and topics.
+- **Not embedded:** language (it would make every repo in a language similar), stars,
+  forks and dates (used as separate metadata features), and the README (costs one API call
+  per repo and is noisy; not implemented).
+- **Embedding cache:** `repo_embeddings(repo_id, model_name)`, keyed by
+  `sha256(embedded_text)`. A change to the description or topics triggers re-embedding; a
+  change in star count does not.
 
-| Role | Fields |
-|---|---|
-| Embedded text | name split into tokens, description, topics |
-| Metadata features (not embedded) | stars, forks, `pushed_at`, language, archived, is_fork, license |
-| Display only | URL, owner |
+**Embedding model:** WordLlama `l2_supercat` (256-d), a pretrained *static* sentence
+embedding model whose weights ship inside its PyPI wheel. Static embeddings ignore word
+order and are weaker than transformer encoders. Decision D-010 explains the trade-off.
+Everything depends only on the `Embedder` protocol, and cached vectors are keyed by model
+name.
 
-- **Language is excluded from the embedding.** Otherwise all repos in one language become
-  similar to each other.
-- **README is excluded in v1.** Fetching it costs one API call per repo and the text is
-  noisy. It is a candidate experiment for repos with missing descriptions (Phase 3).
-- **Embedding cache key:** `(repo_id, model_name, sha256(embedded_text))`. A metadata
-  change (e.g. stars) does not trigger re-embedding.
-
-## 5. Candidate generation (Phase 2; bridge and adjacent queries in Phase 5)
+## 5. Candidate generation (`retrieval/planner.py`, `retrieval/service.py`)
 
 | Family | Query | Purpose |
 |---|---|---|
-| `core` | key terms of one interest + `pushed:>now-12mo` ⚙️ + `stars:>=20` ⚙️ + `archived:false` | baseline coverage |
-| `bridge` | combination of two interests | relevant surprise (relevant to two interests at once) |
-| `adjacent` | topics that co-occur with interest topics in core results but are not in `T_K` | topical novelty |
+| `core` | interest keywords `in:name,description,topics` | baseline coverage, one per interest (max 6) |
+| `bridge` | bridge terms of two interests | repos relevant to two interests at once, up to 3 pairs |
+| `adjacent` | `topic:X`, where X is frequent in core results (≥3 repos) but not in `T_K` and not generic | exploration, up to 2 topics |
 
-- Best-match sort plus a recently-pushed sort. Stars sort is avoided because it always
-  returns the same famous repos, which works against novelty.
-- One page of up to 100 results per query; no pagination.
-- Results are deduplicated by `github_id`. A candidate records *all* families that
-  retrieved it (`query_families`).
-- Search results are cached per normalized query with a TTL ⚙️ of about 6–12h, set in
-  Phase 2. The main driver is GitHub's search rate limit, not latency.
-- **Filters:** archived, forks, no description *and* no topics, below the star floor,
-  repos already in `K`, repos shown to this user in the last N days ⚙️.
-  Every filtered candidate is still **logged** with a `filter_reason`.
+- **Qualifiers on every query:** `pushed:>today-365d stars:>=20 archived:false fork:false` ⚙️.
+- **Sort:** GitHub best-match. Sorting by stars is never used: it returns the same famous
+  repos every time, which works against novelty.
+- **Page size:** one page per query (50 core, 30 bridge/adjacent), no pagination.
+  Candidates are deduped by `github_id`, and every family that retrieved a candidate is
+  remembered.
+- **Canonical planning:** interests are sorted before planning, so the same interest set
+  always produces the same queries and therefore the same cache keys.
+- **Search cache** (`search_cache`): stores an ordered list of repo ids per normalized
+  query, with a 12 h TTL ⚙️. Metadata is upserted into `repositories` from the same
+  response, so a cache hit costs zero API calls.
+- **Degradation, never fabrication:**
 
-## 6. Scoring
+  | Situation | What happens |
+  |---|---|
+  | Fresh cache entry | served from cache |
+  | GitHub available | fetched live and cached |
+  | GitHub failing, stale entry exists | stale entry served; run marked `degraded` with warnings |
+  | GitHub failing, no entry | that query is skipped |
+  | Every query fails | HTTP 503, and a `failed` run is logged |
 
-Let `e_r` be the repository embedding and `u_i` the interest embeddings. All embeddings
-are L2-normalized, so cosine similarity is a dot product.
+- **GitHub client:** 10 s timeout, one retry on 5xx or transport errors, and typed errors.
+  It fails fast without spending a request once the rate limit is known to be exhausted.
 
-### 6.1 Relevance
+## 6. Scoring (`ranking/engine.py`)
+
+All vectors are L2-normalized, so cosine similarity is a dot product.
+
+### 6.0 Filters (every variant)
+A candidate is removed if it is archived, a fork, has no description and no topics, has
+fewer than 20 stars, is already in `K`, or was shown recently. Every filtered candidate
+is still logged, with its `filter_reason`.
+
+### 6.1 Relevance: calibrated per interest
+
+Raw cosine scales differ a lot per interest with static embeddings. On a live pool, the
+mean on-target cosine was 0.39 for "Distributed Systems" and 0.58 for "Competitive
+Programming", so ranking by raw max-cosine showed **zero** distributed-systems repos.
+Relevance is therefore calibrated per interest:
+
 ```
-sim_i(r)      = cos(e_r, u_i)
-rel_raw(r)    = max( max_i w_i·sim_i(r),  α·max_p cos(e_r, e_p) )    p ∈ positive exemplars, α=0.5 ⚙️
-matched(r)    = argmax interest (or the exemplar's source interest)
-rel_norm(r)   = within-pool rank normalization of rel_raw to [0,1]
+s_ij        = cos(repo_i, interest_j)
+background_j = mean cos(interest_j, other curated interest descriptions)   (representation/background.py)
+margin_ij   = s_ij − background_j                    ← used by the gate
+pct_ij      = percentile of s_ij among this pool     ← used for ranking
+rel_i       = max_j  w_j · pct_ij                    (w_j = 1 except D3, §8)
+D3 only:    rel_i = max(rel_i, α · percentile(max_p cos(repo_i, exemplar_p)))     α = 0.5 ⚙️
+matched     = argmax (the interest, or the liked repo, that produced rel_i)
 ```
 
-- **Max, not mean:** a repo that is deeply relevant to one interest is not penalized for
-  ignoring the others. Covering all interests is the diversity stage's job.
-- **Raw score for gating, normalized score for combining.** Raw cosine ranges depend on
-  the embedding model. Rank normalization is model-agnostic, but it hides the case where
-  every candidate in the pool is weak. That is why the gate uses the raw score.
+- **Max, not mean:** a repo deeply relevant to one interest is not penalized for ignoring
+  the others. Representing every interest is the reranker's job (§6.6).
+- **Background similarity** is the cosine an off-topic text typically gets. On the live
+  pool it closely matched the observed off-target mean (0.142 vs 0.134, 0.161 vs 0.120,
+  0.212 vs 0.205).
 
-### 6.2 Relevance gate
+### 6.2 Relevance gate (D1, D2, D3)
 ```
-eligible(r) ⇔ rel_raw(r) ≥ τ   and r ∉ K   and r not recently shown
+eligible ⇔ margin(matched interest) ≥ 0.10 ⚙️   or (D3) cos to a liked repo ≥ 0.5 ⚙️
 ```
-τ ⚙️ is **calibrated** on a hand-labeled set of about 100 (interest, repo) pairs in
-Phase 4. It is not guessed.
 
-**The gate is what separates novelty from randomness:** novelty only reorders
-candidates that are already relevant. An unrelated item cannot be rescued by being
-unfamiliar.
+**The gate is what separates novelty from randomness:** an unrelated item cannot be
+rescued by being unfamiliar. The test `test_gate_excludes_novel_but_irrelevant_item` sets
+β = 100 to prove this.
 
-### 6.3 Novelty components (each in [0, 1], all logged separately)
+### 6.3 Novelty components (each in [0, 1], each logged)
 
-| Component | Definition | Works at cold start? |
+| Component | Definition | Available at cold start? |
 |---|---|---|
-| `unfamiliarity` | `1 − max_{k∈K} cos(e_r, e_k)`; 1 if `K` is empty | No (uninformative until feedback or stars exist) |
-| `topical_novelty` | fraction of the repo's topics not in `T_K`; undefined if the repo has no topics | Partially |
-| `popularity_novelty` | `1 − rank_norm(log(1+stars))` within the pool | Yes |
+| `unfamiliarity` | 1 − max cos to repos in `K` | **No:** undefined (not 1.0) until familiarity data exists |
+| `topical_novelty` | fraction of the repo's non-generic topics not in `T_K` | yes, if the repo has topics |
+| `popularity_novelty` | 1 − percentile of log(1 + stars) in the pool | yes |
 
+`novelty` is the mean of the defined components (equal weights ⚙️).
+
+**Limitations:**
+- At cold start, novelty is topic- and popularity-based only. It becomes personal once
+  the user marks repos as known or liked; the UI says so.
+- Inverse popularity can promote obscure, low-quality repos. The 20-star floor only
+  partly mitigates this.
+
+### 6.4 Negative penalty (D3)
 ```
-novelty(r) = mean of the defined components     (equal weights ⚙️; ablated in Phase 5)
+neg = max cos to a rejected repo,  if that cosine ≥ 0.6 ⚙️, else 0
+```
+The penalty is **local**: it hits near-duplicates of a rejected repo, not the whole
+interest the repo belonged to. The interest itself only decays after repeated
+rejections (§8).
+
+### 6.5 Utility (item level)
+```
+D1:  u = rel + β·novelty                    β = 0.3 ⚙️
+D2:  u = rel
+D3:  u = rel + β·novelty − γ·neg            γ = 1.0 ⚙️
 ```
 
-**Limitations, stated explicitly:**
-- At cold start, novelty is essentially popularity- and topic-based. It becomes
-  personal only once familiarity data exists (feedback, onboarding ticks, or GitHub
-  stars).
-- Stars measure popularity *and* quality, so inverse popularity can promote obscure,
-  low-quality repos. The retrieval star floor partly mitigates this.
-
-### 6.4 Negative-feedback penalty
+### 6.6 Diversity: list-level reranking (D2, D3)
+Greedy **MMR**:
 ```
-neg(r) = max_n cos(e_r, e_n)   if ≥ θ_neg ⚙️ else 0          n ∈ negative exemplars
+next = argmax  λ·u(r) − (1−λ)·max_{s∈S} cos(r, s)        λ = 0.7 ⚙️
 ```
-The penalty is **local**: it suppresses near-duplicates of a rejected repo, not the whole
-interest the repo belonged to.
+It runs subject to:
+- **Owner cap:** at most 2 repos per owner ⚙️.
+- **Interest-coverage floor:** when the number of remaining slots equals the number of
+  interests not yet represented (and those interests have eligible candidates), the
+  choice is restricted to them. This only ever changes the tail of the list.
 
-### 6.5 Utility (item-level)
-```
-utility(r) = rel_norm(r) + β·novelty(r) − γ·neg(r)          β≈0.3 ⚙️, γ≈1.0 ⚙️ (swept)
-```
+Ties are broken by `github_id`, so the whole ranking is deterministic.
 
-### 6.6 Diversity rerank (list-level), Phase 6
-Greedy **MMR** (Maximal Marginal Relevance) over embedding similarity:
-```
-S = ∅
-repeat K times:
-    r* = argmax_{r ∉ S, eligible, owner cap ok}  λ·utility(r) − (1−λ)·max_{s∈S} cos(e_r, e_s)
-    S  = S ∪ {r*}
-```
-- λ ⚙️ is swept to produce a relevance–diversity tradeoff curve; the operating point is
-  chosen using human judgments.
-- **Owner cap:** at most 2 ⚙️ repos per owner. This is a hard constraint that embedding
-  similarity does not reliably enforce.
-- **Known weakness:** MMR reduces redundancy but does not guarantee coverage of every
-  interest. Interest coverage is tracked; if it is poor, xQuAD-style intent-aware
-  diversification is the next experiment.
+Alternatives considered:
+- **xQuAD:** explicit intent coverage, but more parameters. The coverage floor captures
+  the part that mattered.
+- **DPP:** harder to explain and tune, and overkill at K ≈ 10.
+- **Fixed quotas per interest:** ignore relevance strength.
 
-Alternatives considered: xQuAD (more parameters), DPP (harder to explain and tune,
-overkill at K≈10–20), fixed per-interest quotas (brittle, ignores relevance strength).
+## 7. Variants (`enums.RankerVariant`)
 
-## 7. Ranker variants
+| ID | Ranking |
+|---|---|
+| **B0** | stars, descending (no gate) |
+| **B1** | calibrated relevance `rel`, descending (no gate). **Primary baseline.** |
+| **D1** | gate, then `rel + β·novelty`; no MMR |
+| **D2** | gate, then `rel`, then MMR + owner cap + coverage floor |
+| **D3** | gate (+ exemplar gate), then `rel + β·novelty − γ·neg` with decayed interest weights and liked-repo exemplars, then MMR + owner cap + coverage floor |
 
-All variants run on the **same candidate pool** (frozen snapshots offline, the same live
-pool online).
+- Filters apply to every variant, so all variants rank the same pool.
+- Personalization signals are used by D3 only, so their effect can be attributed to it.
+- The API can rank a second variant on the **same** candidate pool (`compare_variant`).
+  The UI uses this to show Detour next to the relevance-only list.
 
-| ID | Ranking | Uses |
+## 8. Feedback → profile
+
+| Feedback | Evidence | Effect on the next run |
 |---|---|---|
-| **B0** | stars, descending | popularity sanity floor |
-| **B1** | `rel_raw`, descending, top-K | **primary baseline** |
-| **D1** | gate → utility with novelty (no MMR) | novelty's contribution |
-| **D2** | gate → `rel_norm` → MMR | diversity's contribution |
-| **D3** | gate → full utility (novelty + negative penalty + feedback-derived profile) → MMR + owner cap | full Detour |
-| *(future)* LTR | learned scorer over logged features, then MMR | only if §10's conditions hold |
+| INTERESTED | preference (+) | becomes a relevance anchor (exemplar) and passes the gate; added to `K` (not re-recommended); topics join `T_K` |
+| NOT_INTERESTED | preference (−) | local penalty for near-duplicates; counts toward its matched interest's decay |
+| ALREADY_KNOW | **familiarity** | added to `K` and `T_K`. This makes similar repos less *novel* but **not less relevant**; no penalty, no decay |
 
-The retrieval contribution (bridge and adjacent query families) is ablated separately by
-running each variant on pools with and without those families.
+Interest decay is computed from the log:
+`w = max(0.5, 0.85^(rejections − 2))` once an interest has more than 2 rejections ⚙️.
 
-## 8. Feedback → profile updates (Phase 7)
+The end-to-end tests check each of these behaviours through the API.
 
-| Feedback | Evidence type | Update |
-|---|---|---|
-| INTERESTED | preference (+) | add positive exemplar; add to `K`; add topics to `T_K` |
-| NOT_INTERESTED | preference (−) | add negative exemplar; after ≥3 ⚙️ rejections attributed to one interest, `w_i ← max(w_min, 0.85·w_i)` ⚙️ |
-| ALREADY_KNOW | **familiarity**, and weak (+) preference | add to `K` and its topics to `T_K`; relevance is **not** penalized |
+Not clicking is **not** treated as negative feedback, because clicks are confounded by
+position and attention.
 
-- Feedback is an append-only log. Profile state is derived from the latest event per
-  (user, repo).
-- **No feedback is not treated as negative feedback**: whether an item was clicked is
-  confounded by its position and by user attention.
+## 9. Explanations (`ranking/explain.py`)
 
-## 9. Explanations (Phase 8)
+Structured reasons are logged in `run_candidates.reasons` and rendered with fixed
+templates. Each claim maps to a computed signal:
 
-The ranker emits structured reasons, e.g.
-`{matched_interest, rel_band, secondary_interest, new_topics, popularity_band, query_family}`.
-A template renders them as text. Every phrase must map to a logged field; tests assert
-each rendered claim against the candidate's scores. An LLM is used, at most, to rephrase
-these reasons, never to decide them.
+| Claim | Signal |
+|---|---|
+| "Strong match with your X interest" | matched-interest percentile ≥ 0.8 |
+| "Also relevant to Y" | second interest's margin ≥ 0.10 (same rule as the gate) |
+| "Similar to R, which you marked as interesting" | exemplar produced the relevance |
+| "Found by a query bridging A and B" | retrieved by a bridge query |
+| "Exploration pick: found via 'T'" | retrieved by an adjacent-topic query |
+| "Introduces topics you haven't interacted with" | non-generic topics not in `T_K` |
+| "Unlike the repositories you've marked as known" | unfamiliarity ≥ 0.6, only when `K` is non-empty |
+| "Less-known project (N stars)" | stars < 2,000 |
+| "Moved up from #N … to keep the list varied" | MMR promoted it ≥ 3 places over pure-utility order |
+
+Tests assert both directions: claims appear when their signal holds, and do not appear
+when it doesn't.
 
 ## 10. Interaction log and learned-model readiness
 
-Every run logs **all** scored candidates (`run_candidates`), shown or not, with
-point-in-time features. See `data-model.md` for the schema.
+Every run logs **all** scored candidates (shown, unshown and filtered) with point-in-time
+features: typed score columns, plus `features` JSONB holding stars, forks, language,
+repo age, days since push, per-interest similarities, relevance margin, query labels,
+nearest rejected repo, and whether MMR promoted the item. Labels come from `feedback`
+joined on (user, repo, run).
 
-| Training feature (planned) | Where it lives |
-|---|---|
-| semantic relevance (raw, normalized) | `relevance_raw`, `relevance_norm` |
-| novelty components | `unfamiliarity`, `topical_novelty`, `popularity_novelty`, `novelty` |
-| negative penalty, utility | `negative_penalty`, `utility` |
-| diversity context | `mmr_score`, `max_sim_to_selected`, `pre_rerank_rank` |
-| matched interest | `matched_interest_id`, `matched_interest_label` |
-| query family | `query_families` |
-| position | `position` |
-| popularity, recency, language match, topic overlap, prior feedback counts | `features` JSONB (point-in-time) |
-| label | `feedback` joined on (user, repo, run) |
+**No learned ranker exists, deliberately.** It should be introduced only when all three
+of these hold:
+1. there are enough labeled impressions for a stable per-user cross-validated model,
+   judged from learning curves on real data;
+2. position bias is handled (position as a feature fixed at inference time, or
+   inverse-propensity weighting);
+3. it beats D3 on held-out users with the pre-registered metrics.
 
-**Conditions for introducing a learned ranker. All must hold; none are assumed:**
-1. There are enough labeled impressions that a per-user-grouped cross-validated model is
-   stable. The threshold will be decided from learning curves on the actual data, not
-   picked in advance.
-2. **Position bias is handled.** Items shown higher get more feedback regardless of
-   quality. Options: include position as a training feature and fix it to a constant at
-   inference, or use inverse-propensity weighting.
-3. On held-out users or sessions, the model beats D3 on the pre-registered metrics in
-   `evaluation.md`.
-
-If these conditions are never met, the project reports that, with the actual number of
-interactions collected. That is an acceptable outcome.
+At the time of writing there are **zero real-user feedback events**, so none of these
+conditions can be met.
 
 ## 11. Parameter register
 
-| Parameter | Start | Decided in | Method |
-|---|---|---|---|
-| τ (relevance gate) | — | Phase 4 | calibration on labeled pairs |
-| β (novelty weight) | 0.3 | Phase 5 | sweep + offline/human eval |
-| γ, θ_neg | 1.0, — | Phase 7 | unit-level behaviour + eval |
-| λ (MMR) | 0.7 | Phase 6 | tradeoff curve + human eval |
-| owner cap | 2 | Phase 6 | inspection |
-| star floor, recency window | 20, 12 months | Phase 2 | pool-quality inspection, pool recall |
-| search cache TTL | 6–12 h | Phase 2 | rate-limit budget |
-| K (list length) | 10 | Phase 9 | product choice |
+| Parameter | Value | How it was chosen |
+|---|---|---|
+| relevance margin | 0.10 | weakly calibrated on one live pool using retrieval provenance as labels: 94% on-target vs 6% off-target pass (`evaluation.md` §7.1) |
+| ranking relevance | per-interest percentile | live pool: top-24 interest mix 8/8/8 vs 14/0/10 with raw cosine |
+| exemplar gate / α | 0.5 / 0.5 | hypothesis |
+| β novelty | 0.3 | hypothesis; not tuned |
+| γ, θ_neg | 1.0, 0.6 | hypothesis; 0.6 ≈ near-duplicate cosine for this model |
+| λ MMR | 0.7 | hypothesis; not tuned |
+| owner cap | 2 | judgement |
+| star floor, recency | 20, 365 days | judgement |
+| cache TTL | 12 h | GitHub search budget |
+| decay | after 2 rejections, ×0.85, floor 0.5 | judgement |
+| K | 10 (API), 8 (UI) | product choice |
+
+None of the hypothesis parameters were tuned on evaluation data. Sweeping them
+(especially λ and β) against the offline benchmark is listed as future work.

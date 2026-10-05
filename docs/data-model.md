@@ -1,6 +1,7 @@
 # Data Model
 
-> Implemented in migration `0001` (Phase 1). Verified by `tests/test_migrations.py` and
+> Implemented in migrations `0001` (Phase 1) and `0002` (search cache, embeddings). Verified
+> by `tests/test_migrations.py` (round-trip + model/migration drift) and
 > `tests/test_schema_constraints.py`.
 
 ## Three kinds of data
@@ -9,14 +10,15 @@
 |---|---|---|---|
 | **Persistent user data** | users, interests, feedback | permanent | `users`, `interests`, `feedback` |
 | **Interaction log** (for evaluation and future training) | runs, every scored candidate with features | permanent, append-only | `recommendation_runs`, `run_candidates` |
-| **Cached external data** | GitHub metadata, search results, embeddings | TTL / content-hash | `repositories` (now); `search_cache` (Phase 2), `repo_embeddings` (Phase 3) |
+| **Cached external data** | GitHub metadata, search results, embeddings | TTL / content-hash | `repositories`, `search_cache`, `repo_embeddings` |
 
 ## Entity diagram
 
 ```
 users ─┬─< interests
-       ├─< recommendation_runs ─< run_candidates >─ repositories
+       ├─< recommendation_runs ─< run_candidates >─ repositories ─< repo_embeddings
        └─< feedback >────────────────────────────── repositories
+search_cache (query → ordered repo ids; no FK, ids resolved against repositories)
                  └── run_id (nullable) ─> recommendation_runs
 run_candidates.matched_interest_id ─> interests (SET NULL; label snapshot kept)
 ```
@@ -62,6 +64,19 @@ Invariants enforced by the database:
   unshown rows is allowed
 - a filtered candidate cannot be shown
 
+### `search_cache` (migration 0002)
+`query_key` (sha256 of normalized query + sort + page size) PK · `query` · `sort?` ·
+`per_page` (1–100) · `total_count` · `repo_ids bigint[]` (ordered) · `fetched_at`.
+Stale rows are kept on purpose: they are served (and the run marked degraded) when GitHub
+is unavailable.
+
+### `repo_embeddings` (migration 0002)
+`(repo_id → repositories CASCADE, model_name)` PK · `text_hash` (sha256 of the embedded
+text) · `dim` · `vector real[]` (CHECK `cardinality(vector) = dim`) · `created_at`.
+Re-embedding happens only when the embedded text changes; vectors from different models
+never mix. 256-d × ~300 vectors per request are scored in NumPy, so no vector index or
+pgvector is needed.
+
 ### `feedback`
 Append-only events: `user_id → users (CASCADE)`, `repo_id → repositories (RESTRICT)`,
 `run_id → runs (SET NULL)`, `type ∈ {INTERESTED, NOT_INTERESTED, ALREADY_KNOW}`,
@@ -88,6 +103,9 @@ feedback given outside a run (e.g. onboarding "repos I already know").
 - **Deletion semantics.** Deleting a user removes all of their data (privacy). Deleting
   an interest keeps the log row and its label snapshot. A repository referenced by the
   log cannot be deleted.
-- **Embeddings are not stored yet.** Their storage format (`real[]` vs `bytea`) and
-  dimension depend on the embedder chosen in Phase 3; they will arrive as a new
-  migration. pgvector is not needed at about 300 vectors per request.
+- **Embeddings as `real[]`.** Readable and constraint-checkable (dimension CHECK); at ~300
+  vectors per request, loading and scoring them in NumPy takes milliseconds. pgvector would
+  only matter for a precomputed global index.
+- **What `run_candidates.features` contains (engine 1.0.0):** stars, forks, language,
+  topic_count, repo_age_days, days_since_push, interest_sims, relevance_margin,
+  matched_via_exemplar, nearest_negative, diversity_promoted, query_labels.

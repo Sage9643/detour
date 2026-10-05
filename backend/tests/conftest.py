@@ -63,3 +63,23 @@ def session(engine: Engine) -> Iterator[Session]:
         sess.close()
         outer.rollback()
         conn.close()
+
+
+ALL_DATA_TABLES = (
+    "feedback, run_candidates, recommendation_runs, interests, users, "
+    "repo_embeddings, search_cache, repositories"
+)
+
+
+@pytest.fixture
+def clean_db(engine: Engine) -> Iterator[Engine]:
+    """For tests whose app commits real transactions: empty tables before AND after, so
+    committed rows never leak into other tests."""
+
+    def truncate() -> None:
+        with engine.begin() as conn:
+            conn.execute(text(f"TRUNCATE {ALL_DATA_TABLES} CASCADE"))
+
+    truncate()
+    yield engine
+    truncate()
