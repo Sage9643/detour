@@ -1,0 +1,29 @@
+# Local development dependencies only. The API runs on the host with uvicorn for fast
+# iteration; it gets a Dockerfile when deployment needs one (see docs/decisions.md).
+#
+#   docker compose up -d          # start Postgres
+#   docker compose down           # stop (data kept in the named volume)
+#   docker compose down -v        # stop and DELETE local data
+#
+# Credentials below are for local development only and match .env.example.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: detour
+      POSTGRES_PASSWORD: detour
+      POSTGRES_DB: detour
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Creates the disposable detour_test database on first start.
+      - ./scripts/db-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U detour -d detour"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  pgdata:

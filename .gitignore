@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Evaluation artifacts (frozen snapshots are large; stored outside git unless small fixtures)
+data/snapshots/
+data/eval_runs/
+
+# Node (frontend, later)
+node_modules/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
