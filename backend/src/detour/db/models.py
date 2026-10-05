@@ -4,9 +4,11 @@ Schema overview (see docs/data-model.md for rationale):
 
     users ─< interests
       │
-      ├─< recommendation_runs ─< run_candidates >─ repositories
+      ├─< recommendation_runs ─< run_candidates >─ repositories ─< repo_embeddings
       │                                   │
       └─< feedback >──────────────────────┘ (repo), optionally linked to a run
+
+    search_cache   (normalized GitHub query -> ordered repo ids; cached external data)
 
 Design rules:
 - run_candidates logs EVERY scored candidate in a run, not only the shown Top-K, so that
@@ -38,7 +40,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, REAL, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from detour.enums import FeedbackType, QueryFamily, RankerVariant, RunStatus
@@ -270,4 +272,46 @@ class Feedback(Base):
         ForeignKey("recommendation_runs.id", ondelete="SET NULL")
     )
     type: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = _created_at()
+
+
+class SearchCacheEntry(Base):
+    """Cached GitHub search result: an ordered list of repository ids for one query.
+
+    Repository metadata itself lives in `repositories` (upserted from the same response),
+    so a cache hit costs zero GitHub calls. Stale entries are kept on purpose: when GitHub
+    is unavailable or rate-limited, a stale entry is served and the run is marked degraded.
+    """
+
+    __tablename__ = "search_cache"
+    __table_args__ = (CheckConstraint("per_page BETWEEN 1 AND 100", name="per_page_range"),)
+
+    query_key: Mapped[str] = mapped_column(Text, primary_key=True)  # sha256 of normalized request
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    sort: Mapped[str | None] = mapped_column(Text)
+    per_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    repo_ids: Mapped[list[int]] = mapped_column(ARRAY(BigInteger), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RepoEmbedding(Base):
+    """Embedding of a repository's semantic text under a specific model.
+
+    Freshness is content-based: text_hash is sha256 of the exact embedded text, so a
+    description/topic change triggers re-embedding while a star-count change does not.
+    """
+
+    __tablename__ = "repo_embeddings"
+    __table_args__ = (
+        CheckConstraint("dim > 0 AND cardinality(vector) = dim", name="dim_matches_vector"),
+    )
+
+    repo_id: Mapped[int] = mapped_column(
+        ForeignKey("repositories.github_id", ondelete="CASCADE"), primary_key=True
+    )
+    model_name: Mapped[str] = mapped_column(Text, primary_key=True)
+    text_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    dim: Mapped[int] = mapped_column(Integer, nullable=False)
+    vector: Mapped[list[float]] = mapped_column(ARRAY(REAL), nullable=False)
     created_at: Mapped[datetime] = _created_at()
