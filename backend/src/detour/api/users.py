@@ -49,7 +49,7 @@ def _interests_out(session: Session, user_id: uuid.UUID) -> list[InterestOut]:
     rows = session.scalars(
         select(Interest)
         .where(Interest.user_id == user_id, Interest.active.is_(True))
-        .order_by(Interest.created_at, Interest.id)
+        .order_by(Interest.created_at, Interest.label)
     ).all()
     out = []
     for row in rows:

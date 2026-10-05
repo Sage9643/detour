@@ -76,6 +76,28 @@ class RecordingTransport(httpx.BaseTransport):
         self._inner.close()
 
 
+class ReplayOrRecordTransport(httpx.BaseTransport):
+    """Serve successful recorded responses; fetch and record anything else.
+
+    Used by resumable offline collection: re-running a step never spends API budget on a
+    request that already succeeded. Error responses (e.g. 403 rate limit) are re-fetched.
+    """
+
+    def __init__(self, directory: Path, inner: httpx.BaseTransport | None = None) -> None:
+        self._replay = ReplayTransport(directory)
+        self._record = RecordingTransport(directory, inner)
+        self._dir = directory
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        path = self._dir / f"{request_key(request)}.json"
+        if path.exists() and json.loads(path.read_text(encoding="utf-8"))["status"] == 200:
+            return self._replay.handle_request(request)
+        return self._record.handle_request(request)
+
+    def close(self) -> None:
+        self._record.close()
+
+
 class CassetteMiss(httpx.TransportError):
     """Replay mode: no recording exists for this request."""
 

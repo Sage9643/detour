@@ -105,6 +105,10 @@ class GitHubClient:
         items = [RepoRecord.from_github(it) for it in data.get("items", [])]
         return SearchResult(total_count=int(data.get("total_count", 0)), items=items)
 
+    def get(self, path: str, params: dict[str, str | int], accept: str | None = None) -> Any:
+        """Generic GET on the core API (used by offline dataset collection)."""
+        return self._get_json(path, params, self.core_rate, accept=accept)
+
     def starred(self, username: str, max_pages: int = 3) -> list[StarredRepo]:
         """A user's starred repositories with timestamps (newest first)."""
         out: list[StarredRepo] = []

@@ -1,0 +1,24 @@
+# Render Blueprint for the Detour API (https://render.com/docs/blueprint-spec).
+# Secrets are NOT stored here: set DATABASE_URL (Neon connection string), GITHUB_TOKEN and
+# DETOUR_CORS_ORIGINS (your Vercel URL) in the Render dashboard when prompted.
+services:
+  - type: web
+    name: detour-api
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install .
+    # Migrations run before the server starts so /health/ready never sees a stale schema.
+    startCommand: alembic upgrade head && uvicorn detour.main:create_default_app --factory --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: DETOUR_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: DETOUR_CORS_ORIGINS
+        sync: false

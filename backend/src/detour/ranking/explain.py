@@ -14,6 +14,7 @@ from detour.ranking.profile import UserProfile
 
 STRONG_REL_NORM = 0.8  # top 20% of this pool for the matched interest
 UNFAMILIAR_MIN = 0.6  # unfamiliarity at/above this is worth mentioning
+DIVERSITY_MOVE_MIN = 3  # positions an item must move up under MMR before we mention it
 
 
 def popularity_band(stars: int) -> str:
@@ -68,8 +69,15 @@ def build_reasons(s: ScoredCandidate, profile: UserProfile, margin: float) -> di
         reasons["bridge"] = list(cand.bridge_pairs[0])
     if QueryFamily.ADJACENT in cand.families and cand.adjacent_topics:
         reasons["adjacent_topic"] = sorted(cand.adjacent_topics)[0]
-    if s.diversity_promoted:
+    # Only claim a diversity effect when MMR moved the item up substantially.
+    if (
+        s.diversity_promoted
+        and s.position is not None
+        and s.pre_rerank_rank is not None
+        and s.pre_rerank_rank - s.position >= DIVERSITY_MOVE_MIN
+    ):
         reasons["diversity_promoted"] = True
+        reasons["moved_up_from"] = s.pre_rerank_rank + 1
     if s.negative_penalty:
         reasons["near_rejected"] = s.nearest_negative
     return reasons
@@ -104,7 +112,8 @@ def render(reasons: dict[str, Any]) -> list[str]:
         out.append(f"Less-known project ({reasons['stars']:,} stars).")
     if reasons.get("diversity_promoted"):
         out.append(
-            "Picked over a higher-scoring but more similar repository to keep the list varied."
+            f"Moved up from #{reasons['moved_up_from']} by score to keep the list varied: "
+            "higher-scoring picks were too similar to ones above it."
         )
     return out
 

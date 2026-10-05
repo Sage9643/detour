@@ -126,3 +126,16 @@ def test_exemplar_and_unfamiliarity_explanations() -> None:
 )
 def test_popularity_bands(stars: int, band: str) -> None:
     assert popularity_band(stars) == band
+
+
+def test_diversity_claim_only_when_mmr_moved_item_up_substantially() -> None:
+    p = profile([("ML", vec(1, 0, 0, 0))])
+    res = _ranked([item(repo(1), vec(1, 0, 0, 0))], p)
+    s = res.shown[0]
+    s.diversity_promoted, s.position = True, 1
+    s.pre_rerank_rank = 2  # moved up by 1: not worth claiming
+    assert "diversity_promoted" not in build_reasons(s, p, margin=0.10)
+    s.pre_rerank_rank = 6  # moved up by 5
+    reasons = build_reasons(s, p, margin=0.10)
+    assert reasons["moved_up_from"] == 7
+    assert any(line.startswith("Moved up from #7") for line in render(reasons))

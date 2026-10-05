@@ -39,13 +39,16 @@ def test_primary_plan_has_one_core_query_per_interest_and_bridges() -> None:
     plans = plan_primary(specs, RetrievalConfig(), TODAY)
     core = [p for p in plans if p.family is QueryFamily.CORE]
     bridge = [p for p in plans if p.family is QueryFamily.BRIDGE]
+    # canonical (alphabetical) order, independent of the order interests were entered
     assert [p.label for p in core] == [
-        "Machine Learning",
-        "Distributed Systems",
         "Competitive Programming",
+        "Distributed Systems",
+        "Machine Learning",
     ]
     assert len(bridge) == 3
-    assert bridge[0].interest_labels == ("Machine Learning", "Distributed Systems")
+    assert bridge[0].interest_labels == ("Competitive Programming", "Distributed Systems")
+    shuffled = [resolve_interest(x) for x in ("CP", "ML", "Distributed Systems")]
+    assert [p.q for p in plan_primary(shuffled, RetrievalConfig(), TODAY)] == [p.q for p in plans]
     for p in plans:
         assert "pushed:>2025-10-05" in p.q
         assert "stars:>=20" in p.q
@@ -188,7 +191,7 @@ def test_retriever_merges_families_and_dedupes() -> None:
     out = retriever.retrieve(specs, known_topics=set(), cfg=RetrievalConfig(adjacent_min_support=2))
     horovod = out.candidates[204]
     assert {QueryFamily.CORE, QueryFamily.BRIDGE} <= horovod.families
-    assert horovod.bridge_pairs == [("Distributed Systems", "Machine Learning")]
+    assert horovod.bridge_pairs == [("Distributed Systems", "Machine Learning")]  # sorted
     assert len(out.candidates) == len({c.repo.github_id for c in out.candidates.values()})
     assert out.github_calls == len(out.queries)
     assert not out.degraded

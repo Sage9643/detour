@@ -11,7 +11,7 @@ the experiment definition and are logged with every run.
 from enum import StrEnum
 from functools import lru_cache
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     cors_origins: str = Field(
         default="http://localhost:5173,http://127.0.0.1:5173", alias="DETOUR_CORS_ORIGINS"
     )
+
+    @field_validator("database_url")
+    @classmethod
+    def use_psycopg_driver(cls, v: str) -> str:
+        """Accept plain postgres URLs as given by Neon/Render; select the psycopg 3 driver."""
+        for prefix in ("postgresql://", "postgres://"):
+            if v.startswith(prefix):
+                return "postgresql+psycopg://" + v[len(prefix) :]
+        return v
 
     @property
     def cors_origin_list(self) -> list[str]:

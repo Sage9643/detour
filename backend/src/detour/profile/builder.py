@@ -92,7 +92,7 @@ def build_profile(
     interests = session.scalars(
         select(Interest)
         .where(Interest.user_id == user_id, Interest.active.is_(True))
-        .order_by(Interest.created_at, Interest.id)
+        .order_by(Interest.created_at, Interest.label)
     ).all()
     state = load_feedback_state(session, user_id)
 

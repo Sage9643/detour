@@ -50,7 +50,9 @@ def plan_primary(
 ) -> list[PlannedQuery]:
     """Core queries for every interest, then bridge queries for interest pairs."""
     quals = qualifiers(cfg, today)
-    chosen = list(interests)[: cfg.max_interests]
+    # Canonical order: the same interest SET always yields the same queries (and therefore
+    # the same cache keys), regardless of the order the user entered them in.
+    chosen = sorted(interests, key=lambda s: s.label.lower())[: cfg.max_interests]
     plans = [
         PlannedQuery(
             family=QueryFamily.CORE,
