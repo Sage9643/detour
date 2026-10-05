@@ -68,7 +68,7 @@ docker compose up -d                 # Postgres 16 with the detour + detour_test
 cd backend
 python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
-cp ../.env.example .env              # optionally add GITHUB_TOKEN=... (no scopes needed)
+cp ../.env.example .env              # Windows: copy ..\.env.example .env ; optionally add GITHUB_TOKEN=...
 alembic upgrade head
 uvicorn detour.main:create_default_app --factory --reload     # http://localhost:8000/docs
 
